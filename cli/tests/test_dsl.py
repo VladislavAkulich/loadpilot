@@ -1,6 +1,6 @@
 import pytest
 
-from loadpilot.dsl import VUser, _scenarios, scenario, task
+from loadpilot.dsl import VUser, _clear_scenarios, _scenarios, scenario, task
 
 
 @pytest.fixture(autouse=True)
@@ -131,3 +131,21 @@ def test_vuser_on_start_is_noop():
 def test_vuser_on_stop_is_noop():
     u = VUser()
     u.on_stop(None)  # must not raise
+
+
+# ── _clear_scenarios ──────────────────────────────────────────────────────────
+
+def test_clear_scenarios_empties_list():
+    @scenario(rps=10)
+    class FlowA(VUser):
+        pass
+
+    assert len(_scenarios) == 1
+    _clear_scenarios()
+    assert len(_scenarios) == 0
+
+
+def test_clear_scenarios_idempotent():
+    _clear_scenarios()
+    _clear_scenarios()
+    assert len(_scenarios) == 0

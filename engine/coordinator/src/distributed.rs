@@ -52,6 +52,9 @@ struct AgentMetricsMsg {
     active_workers: u64,
     phase: String,
     latency: LatencySnapshot,
+    /// Sparse histogram: each entry is [bucket_index_ms, count].
+    #[serde(default)]
+    histogram_buckets: Vec<[u64; 2]>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -72,6 +75,19 @@ struct AggregatedSnapshot {
     active_workers: u64,
     phase: String,
     latency: LatencySnapshot,
+}
+
+const MAX_BUCKET: usize = 10_000;
+
+fn percentile_from_merged(buckets: &[u64; MAX_BUCKET + 1], total: u64, p: f64) -> f64 {
+    if total == 0 { return 0.0; }
+    let target = (total as f64 * p).ceil() as u64;
+    let mut cum = 0u64;
+    for (i, &count) in buckets.iter().enumerate() {
+        cum += count;
+        if cum >= target { return i as f64; }
+    }
+    MAX_BUCKET as f64
 }
 
 fn aggregate(snapshots: &[AgentMetricsMsg]) -> AggregatedSnapshot {
@@ -99,10 +115,12 @@ fn aggregate(snapshots: &[AgentMetricsMsg]) -> AggregatedSnapshot {
     let phase = if snapshots.iter().all(|s| s.phase == "done") {
         "done".to_string()
     } else {
+        // Exclude "done" agents — overall phase is only "done" when ALL are done.
         let priority = |p: &str| match p {
-            "steady" => 2, "ramp_down" => 3, "done" => 4, _ => 1,
+            "steady" => 2, "ramp_down" => 3, _ => 1,
         };
         snapshots.iter()
+            .filter(|s| s.phase != "done")
             .max_by_key(|s| priority(s.phase.as_str()))
             .map(|s| s.phase.clone())
             .unwrap_or_else(|| "ramp_up".to_string())
@@ -112,12 +130,34 @@ fn aggregate(snapshots: &[AgentMetricsMsg]) -> AggregatedSnapshot {
     let mean_ms = snapshots.iter()
         .map(|s| s.latency.mean_ms * s.requests_total as f64)
         .sum::<f64>() / total_req;
-
-    let p50_ms = snapshots.iter().map(|s| s.latency.p50_ms).sum::<f64>() / snapshots.len() as f64;
-    let p95_ms = snapshots.iter().map(|s| s.latency.p95_ms).sum::<f64>() / snapshots.len() as f64;
-    let p99_ms = snapshots.iter().map(|s| s.latency.p99_ms).sum::<f64>() / snapshots.len() as f64;
     let max_ms = snapshots.iter().map(|s| s.latency.max_ms).fold(0.0_f64, f64::max);
     let min_ms = snapshots.iter().map(|s| s.latency.min_ms).fold(f64::MAX, f64::min);
+
+    // Merge histograms for exact percentiles.
+    // Fall back to simple average only if no agent sent histogram data.
+    let has_histograms = snapshots.iter().any(|s| !s.histogram_buckets.is_empty());
+    let (p50_ms, p95_ms, p99_ms) = if has_histograms {
+        let mut merged = [0u64; MAX_BUCKET + 1];
+        for s in snapshots {
+            for &[idx, count] in &s.histogram_buckets {
+                let i = (idx as usize).min(MAX_BUCKET);
+                merged[i] += count;
+            }
+        }
+        (
+            percentile_from_merged(&merged, requests_total, 0.50),
+            percentile_from_merged(&merged, requests_total, 0.95),
+            percentile_from_merged(&merged, requests_total, 0.99),
+        )
+    } else {
+        // Fallback: simple average (old behaviour, used when histogram_buckets absent)
+        let n = snapshots.len() as f64;
+        (
+            snapshots.iter().map(|s| s.latency.p50_ms).sum::<f64>() / n,
+            snapshots.iter().map(|s| s.latency.p95_ms).sum::<f64>() / n,
+            snapshots.iter().map(|s| s.latency.p99_ms).sum::<f64>() / n,
+        )
+    };
 
     AggregatedSnapshot {
         timestamp_secs: now,
@@ -272,6 +312,7 @@ async fn aggregate_loop(
                     active_workers: s.active_workers,
                     phase: s.phase.clone(),
                     latency: s.latency.clone(),
+                    histogram_buckets: s.histogram_buckets.clone(),
                 }).collect();
 
                 let agg = aggregate(&snaps);
@@ -413,5 +454,133 @@ fn update_prometheus(shared: &SharedSnapshot, agg: &AggregatedSnapshot) {
     };
     if let Ok(mut guard) = shared.write() {
         *guard = Some(snapshot);
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_agent(agent_id: &str, buckets: Vec<[u64; 2]>, requests: u64) -> AgentMetricsMsg {
+        AgentMetricsMsg {
+            agent_id: agent_id.to_string(),
+            elapsed_secs: 1.0,
+            current_rps: requests as f64,
+            target_rps: requests as f64,
+            requests_total: requests,
+            errors_total: 0,
+            active_workers: 1,
+            phase: "steady".to_string(),
+            latency: LatencySnapshot::default(),
+            histogram_buckets: buckets,
+        }
+    }
+
+    // ── percentile_from_merged ────────────────────────────────────────────────
+
+    #[test]
+    fn percentile_empty_returns_zero() {
+        let buckets = [0u64; MAX_BUCKET + 1];
+        assert_eq!(percentile_from_merged(&buckets, 0, 0.99), 0.0);
+    }
+
+    #[test]
+    fn percentile_single_bucket() {
+        let mut buckets = [0u64; MAX_BUCKET + 1];
+        buckets[42] = 100;
+        assert_eq!(percentile_from_merged(&buckets, 100, 0.50), 42.0);
+        assert_eq!(percentile_from_merged(&buckets, 100, 0.99), 42.0);
+    }
+
+    #[test]
+    fn percentile_two_equal_groups() {
+        // 100 requests at 10ms, 100 requests at 100ms
+        let mut buckets = [0u64; MAX_BUCKET + 1];
+        buckets[10] = 100;
+        buckets[100] = 100;
+        // p50: target=100, cumulative hits 100 at bucket 10
+        assert_eq!(percentile_from_merged(&buckets, 200, 0.50), 10.0);
+        // p99: target=198, cumulative at 10=100 < 198, at 100=200 >= 198
+        assert_eq!(percentile_from_merged(&buckets, 200, 0.99), 100.0);
+    }
+
+    // ── aggregate: histogram merging ─────────────────────────────────────────
+
+    #[test]
+    fn aggregate_empty_returns_ramp_up_phase() {
+        let agg = aggregate(&[]);
+        assert_eq!(agg.phase, "ramp_up");
+        assert_eq!(agg.requests_total, 0);
+    }
+
+    #[test]
+    fn aggregate_merges_histograms_exactly() {
+        // Agent 1: 100 req all at 10ms
+        // Agent 2: 100 req all at 100ms
+        // Simple average p99 = (10 + 100) / 2 = 55ms  ← WRONG
+        // Merged     p99 = 100ms                       ← CORRECT
+        let agents = vec![
+            make_agent("agent-0", vec![[10, 100]], 100),
+            make_agent("agent-1", vec![[100, 100]], 100),
+        ];
+        let agg = aggregate(&agents);
+        assert_eq!(agg.requests_total, 200);
+        assert_eq!(agg.latency.p50_ms, 10.0,  "p50 should be 10ms (first half of requests)");
+        assert_eq!(agg.latency.p99_ms, 100.0, "p99 should be 100ms, not 55ms average");
+    }
+
+    #[test]
+    fn aggregate_falls_back_to_average_without_histograms() {
+        // When no histogram_buckets, coordinator falls back to simple average.
+        let agents = vec![
+            make_agent("agent-0", vec![], 100),
+            make_agent("agent-1", vec![], 100),
+        ];
+        // Both have latency p99=0 (default), average = 0
+        let agg = aggregate(&agents);
+        assert_eq!(agg.latency.p99_ms, 0.0);
+    }
+
+    #[test]
+    fn aggregate_sums_rps_and_requests() {
+        let agents = vec![
+            make_agent("agent-0", vec![[10, 50]], 50),
+            make_agent("agent-1", vec![[20, 50]], 50),
+        ];
+        let agg = aggregate(&agents);
+        assert_eq!(agg.requests_total, 100);
+        assert_eq!(agg.current_rps, 100.0);
+    }
+
+    #[test]
+    fn aggregate_phase_done_only_when_all_done() {
+        let mut a0 = make_agent("agent-0", vec![], 100);
+        let mut a1 = make_agent("agent-1", vec![], 100);
+        a0.phase = "done".to_string();
+        a1.phase = "steady".to_string();
+        let agg = aggregate(&[a0, a1]);
+        assert_ne!(agg.phase, "done");
+    }
+
+    #[test]
+    fn aggregate_phase_done_when_all_done() {
+        let mut a0 = make_agent("agent-0", vec![], 100);
+        let mut a1 = make_agent("agent-1", vec![], 100);
+        a0.phase = "done".to_string();
+        a1.phase = "done".to_string();
+        let agg = aggregate(&[a0, a1]);
+        assert_eq!(agg.phase, "done");
+    }
+
+    #[test]
+    fn aggregate_max_ms_is_maximum_across_agents() {
+        let mut a0 = make_agent("agent-0", vec![], 100);
+        let mut a1 = make_agent("agent-1", vec![], 100);
+        a0.latency.max_ms = 200.0;
+        a1.latency.max_ms = 500.0;
+        let agg = aggregate(&[a0, a1]);
+        assert_eq!(agg.latency.max_ms, 500.0);
     }
 }

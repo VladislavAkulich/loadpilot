@@ -141,3 +141,30 @@ def test_generate_file_is_valid_html():
         content = out.read_text()
         assert content.startswith("<!DOCTYPE html>")
         assert content.endswith("</html>")
+
+
+# ── n_agents ──────────────────────────────────────────────────────────────────
+
+def test_build_single_agent_no_distributed_badge():
+    html = _report._build(SNAPSHOTS, "S", "http://localhost", 10, 60, 10, n_agents=1)
+    assert "distributed" not in html
+
+
+def test_build_distributed_shows_agent_count():
+    html = _report._build(SNAPSHOTS, "S", "http://localhost", 10, 60, 10, n_agents=3)
+    assert "distributed" in html
+    assert "3" in html
+
+
+def test_build_distributed_badge_absent_for_single():
+    html = _report._build(SNAPSHOTS, "S", "http://localhost", 10, 60, 10, n_agents=1)
+    assert "agents" not in html
+
+
+def test_generate_passes_n_agents():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "report.html"
+        _report.generate(SNAPSHOTS, "S", "http://localhost", 10, 60, 10, out, n_agents=4)
+        content = out.read_text()
+        assert "distributed" in content
+        assert "4" in content

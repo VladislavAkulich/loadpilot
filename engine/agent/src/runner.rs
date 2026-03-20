@@ -76,6 +76,9 @@ pub struct AgentMetrics {
     pub active_workers: u64,
     pub phase: String,
     pub latency: LatencySnapshot,
+    /// Sparse histogram for exact percentile merging on coordinator side.
+    /// Each entry is [bucket_index_ms, count]. Only non-zero buckets included.
+    pub histogram_buckets: Vec<[u64; 2]>,
 }
 
 // ── Internal counters ─────────────────────────────────────────────────────────
@@ -150,6 +153,15 @@ impl Counters {
         let max_ms = { let v = self.latency_max.load(Ordering::Relaxed); if v == 0 { 0.0 } else { v as f64 } };
         let min_ms = { let v = self.latency_min.load(Ordering::Relaxed); if v == u64::MAX { 0.0 } else { v as f64 } };
 
+        let histogram_buckets: Vec<[u64; 2]> = self.latency_buckets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| {
+                let c = b.load(Ordering::Relaxed);
+                if c > 0 { Some([i as u64, c]) } else { None }
+            })
+            .collect();
+
         AgentMetrics {
             agent_id: String::new(), // filled by main.rs
             elapsed_secs: elapsed,
@@ -165,6 +177,7 @@ impl Counters {
                 p99_ms: self.percentile(0.99),
                 max_ms, min_ms, mean_ms,
             },
+            histogram_buckets,
         }
     }
 }
