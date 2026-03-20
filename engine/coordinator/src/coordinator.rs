@@ -98,7 +98,7 @@ impl Coordinator {
         let bridge: Option<Arc<Mutex<PythonBridge>>> =
             if let (Some(sf), Some(sc)) = (&plan.scenario_file, &plan.scenario_class) {
                 let n = plan.n_vusers.unwrap_or(5) as usize;
-                match PythonBridge::new(sf, sc, n, &plan.target_url) {
+                match PythonBridge::new(sf, sc, n, &plan.target_url, http_client.clone(), tokio::runtime::Handle::current()) {
                     Ok(b) => {
                         eprintln!("[loadpilot] PyO3 bridge ready ({} VUsers)", n);
                         Some(Arc::new(Mutex::new(b)))
@@ -256,13 +256,15 @@ impl Coordinator {
                 let t = pick_task(&plan.tasks, i);
                 let task_name = t.name.clone();
 
-                let client = http_client.clone();
                 let metrics_task = metrics.clone();
                 let sem_clone = sem.clone();
                 let active_clone2 = active_workers.clone();
 
                 if let Some(ref b) = bridge {
-                    // PyO3 path: ask Python for request params, then execute with reqwest.
+                    // PyO3 path: run the full Python task with a real httpx client.
+                    // http_client (reqwest) is not used here — Python drives HTTP via httpx.
+                    // Each HTTP call the task makes is recorded separately in metrics.
+                    // This handles both single-call and multi-call tasks transparently.
                     let b = Arc::clone(b);
                     let vuser_idx = dispatch_idx % n_ready;
                     dispatch_idx = dispatch_idx.wrapping_add(1);
@@ -274,91 +276,44 @@ impl Coordinator {
                         };
                         active_clone2.fetch_add(1, Ordering::Relaxed);
 
-                        // Call Python callback in a blocking thread (GIL acquired briefly).
-                        let task_name_p = task_name.clone();
-                        let b_prepare = Arc::clone(&b);
-                        let params_result = tokio::task::spawn_blocking(move || {
-                            b_prepare.lock().unwrap().prepare_task(vuser_idx, &task_name_p)
+                        let b_run = Arc::clone(&b);
+                        let task_name_r = task_name.clone();
+                        let run_result = tokio::task::spawn_blocking(move || {
+                            b_run.lock().unwrap().run_task(vuser_idx, &task_name_r)
                         })
                         .await;
 
-                        let params = match params_result {
-                            Ok(Ok(p)) => p,
-                            Ok(Err(e)) => {
-                                eprintln!("[loadpilot] prepare_task error: {}", e);
-                                metrics_task.record_error(0);
-                                active_clone2.fetch_sub(1, Ordering::Relaxed);
-                                return;
-                            }
-                            Err(e) => {
-                                eprintln!("[loadpilot] spawn_blocking panic: {}", e);
-                                metrics_task.record_error(0);
-                                active_clone2.fetch_sub(1, Ordering::Relaxed);
-                                return;
-                            }
-                        };
-
-                        // Phase 2: execute the HTTP request with reqwest (no GIL held).
-                        let t0 = Instant::now();
-                        let http_result = execute_request(
-                            &client,
-                            &params.method,
-                            &params.url,
-                            &params.headers,
-                            params.body.as_deref(),
-                        )
-                        .await;
-                        let latency_ms = t0.elapsed().as_millis() as u64;
-
-                        let http_resp = match http_result {
-                            Ok(r) => r,
-                            Err(e) => {
-                                eprintln!("[loadpilot] HTTP error: {}", e);
-                                metrics_task.record_error(latency_ms);
-                                active_clone2.fetch_sub(1, Ordering::Relaxed);
-                                return;
-                            }
-                        };
-
-                        // Phase 3: pass the real response to an optional
-                        // check_{task_name}(self, response) method in Python.
-                        let b_check = Arc::clone(&b);
-                        let task_name_c = task_name.clone();
-                        let check_result = tokio::task::spawn_blocking(move || {
-                            b_check.lock().unwrap().run_check(
-                                vuser_idx,
-                                &task_name_c,
-                                http_resp.status,
-                                http_resp.headers,
-                                http_resp.body,
-                            )
-                        })
-                        .await;
-
-                        match check_result {
-                            Ok(Ok(r)) if r.success => metrics_task.record_success(latency_ms),
-                            Ok(Ok(r)) => {
-                                if let Some(err) = &r.error {
-                                    eprintln!(
-                                        "[loadpilot] assertion failed ({}): {}",
-                                        task_name, err
-                                    );
+                        match run_result {
+                            Ok(Ok(calls)) => {
+                                if calls.is_empty() {
+                                    metrics_task.record_error(0);
+                                } else {
+                                    for cr in calls {
+                                        if let Some(ref err) = cr.error {
+                                            eprintln!("[loadpilot] task error ({}): {}", task_name, err);
+                                        }
+                                        if cr.success {
+                                            metrics_task.record_success(cr.elapsed_ms);
+                                        } else {
+                                            metrics_task.record_error(cr.elapsed_ms);
+                                        }
+                                    }
                                 }
-                                metrics_task.record_error(latency_ms);
                             }
                             Ok(Err(e)) => {
-                                eprintln!("[loadpilot] run_check error: {}", e);
-                                metrics_task.record_error(latency_ms);
+                                eprintln!("[loadpilot] run_task error: {}", e);
+                                metrics_task.record_error(0);
                             }
                             Err(e) => {
                                 eprintln!("[loadpilot] spawn_blocking panic: {}", e);
-                                metrics_task.record_error(latency_ms);
+                                metrics_task.record_error(0);
                             }
                         }
                         active_clone2.fetch_sub(1, Ordering::Relaxed);
                     });
                 } else {
                     // Static path: URL / method come directly from the plan.
+                    let client = http_client.clone();
                     let url =
                         format!("{}{}", plan.target_url.trim_end_matches('/'), t.url);
                     let method = t.method.clone();

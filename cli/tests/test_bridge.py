@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from loadpilot._bridge import CheckResponse, MockClient, MockResponse
+from loadpilot._bridge import AllCallsMockClient, CheckResponse, MockClient, MockResponse
 
 
 # ── MockResponse ──────────────────────────────────────────────────────────────
@@ -128,3 +128,64 @@ def test_check_response_assertion_failure():
     r = CheckResponse(200, {}, '{"id": 99}')
     with pytest.raises(AssertionError):
         assert r.json()["id"] == 42
+
+
+# ── AllCallsMockClient ────────────────────────────────────────────────────────
+
+def test_all_calls_mock_empty():
+    c = AllCallsMockClient()
+    assert c.call_count() == 0
+    method, path, headers, body = c.get_first_call()
+    assert method is None
+    assert path is None
+
+
+def test_all_calls_mock_single_call():
+    c = AllCallsMockClient()
+    c.get("/health")
+    assert c.call_count() == 1
+    method, path, headers, body = c.get_first_call()
+    assert method == "GET"
+    assert path == "/health"
+
+
+def test_all_calls_mock_records_multiple_calls():
+    c = AllCallsMockClient()
+    c.get("/cart")
+    c.post("/checkout", json={"item": 1})
+    c.get("/confirm")
+    assert c.call_count() == 3
+
+
+def test_all_calls_mock_first_call_headers_captured():
+    c = AllCallsMockClient()
+    c.post("/login", headers={"X-Token": "secret"})
+    c.get("/profile")
+    method, path, headers, body = c.get_first_call()
+    assert method == "POST"
+    assert path == "/login"
+    assert headers == {"X-Token": "secret"}
+
+
+def test_all_calls_mock_all_methods_count():
+    c = AllCallsMockClient()
+    c.get("/a")
+    c.post("/b")
+    c.put("/c")
+    c.patch("/d")
+    c.delete("/e")
+    assert c.call_count() == 5
+
+
+def test_all_calls_mock_single_call_not_multi():
+    c = AllCallsMockClient()
+    c.get("/health")
+    assert c.call_count() == 1
+    assert not (c.call_count() > 1)  # would not be flagged as multi_call
+
+
+def test_all_calls_mock_returns_mock_response():
+    c = AllCallsMockClient()
+    r = c.get("/any")
+    assert r.status_code == 200
+    assert r.ok is True

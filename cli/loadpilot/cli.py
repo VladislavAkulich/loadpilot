@@ -35,10 +35,17 @@ console = Console()
 # Helpers
 # ---------------------------------------------------------------------------
 
+_EXE = ".exe" if sys.platform == "win32" else ""
+
 COORDINATOR_BINARY_CANDIDATES = [
-    Path(__file__).parent.parent.parent / "engine" / "target" / "release" / "coordinator",
-    Path(__file__).parent.parent.parent / "engine" / "target" / "debug" / "coordinator",
-    shutil.which("loadpilot-coordinator") or "",
+    # 1. Bundled inside the installed wheel (pip install loadpilot).
+    Path(__file__).parent / f"coordinator{_EXE}",
+    # 2. Local dev build (cargo build --release inside engine/).
+    Path(__file__).parent.parent.parent / "engine" / "target" / "release" / f"coordinator{_EXE}",
+    # 3. Local dev build debug.
+    Path(__file__).parent.parent.parent / "engine" / "target" / "debug" / f"coordinator{_EXE}",
+    # 4. System PATH.
+    Path(shutil.which("loadpilot-coordinator") or ""),
 ]
 
 
@@ -125,6 +132,7 @@ def _build_plan(scenario_file: Path, target: str) -> ScenarioPlan:
         scenario_file=str(scenario_file.resolve()) if has_callbacks else None,
         scenario_class=s.name if has_callbacks else None,
         n_vusers=n_vusers if has_callbacks else None,
+        thresholds=s.thresholds,
     )
 
 
@@ -172,6 +180,69 @@ def _render_dashboard(metrics: AgentMetrics, scenario_name: str) -> Panel:
     return Panel("\n".join(lines), title="[bold magenta]LoadPilot[/]", border_style="magenta")
 
 
+_THRESHOLD_LABELS: dict[str, str] = {
+    "p50_ms":     "p50 latency",
+    "p95_ms":     "p95 latency",
+    "p99_ms":     "p99 latency",
+    "max_ms":     "max latency",
+    "error_rate": "error rate",
+}
+
+
+def _check_thresholds(metrics: AgentMetrics, thresholds: dict[str, float]) -> bool:
+    """Evaluate SLA thresholds against final metrics. Prints a result table.
+    Returns True if any threshold is breached."""
+    error_rate = (
+        metrics.errors_total / metrics.requests_total * 100
+        if metrics.requests_total > 0 else 0.0
+    )
+    actual: dict[str, float] = {
+        "p50_ms":     metrics.latency.p50_ms,
+        "p95_ms":     metrics.latency.p95_ms,
+        "p99_ms":     metrics.latency.p99_ms,
+        "max_ms":     metrics.latency.max_ms,
+        "error_rate": error_rate,
+    }
+
+    breached: list[tuple[str, float, float]] = []
+    passed:   list[tuple[str, float, float]] = []
+
+    for key, limit in thresholds.items():
+        value = actual.get(key)
+        if value is None:
+            console.print(f"[yellow]Unknown threshold key:[/] {key!r} — skipped")
+            continue
+        if value > limit:
+            breached.append((key, value, limit))
+        else:
+            passed.append((key, value, limit))
+
+    console.print("\n[bold]Thresholds[/]")
+    unit = {"error_rate": "%"}.get
+    for key, value, limit in passed:
+        u = unit(key) or "ms"
+        label = _THRESHOLD_LABELS.get(key, key)
+        console.print(
+            f"  [green]✓[/]  {label:<16} {value:>8.1f}{u}  <  {limit:.1f}{u}"
+        )
+    for key, value, limit in breached:
+        u = unit(key) or "ms"
+        label = _THRESHOLD_LABELS.get(key, key)
+        console.print(
+            f"  [red]✗[/]  {label:<16} {value:>8.1f}{u}  >  {limit:.1f}{u}  [red][BREACHED][/]"
+        )
+
+    if breached:
+        console.print(
+            f"\n[bold red]SLA breach — {len(breached)} threshold(s) exceeded.[/] "
+            "Exiting with code 1."
+        )
+        return True
+
+    console.print("\n[bold green]All thresholds passed.[/]")
+    return False
+
+
 def _fmt_duration(secs: int) -> str:
     m, s = divmod(secs, 60)
     h, m = divmod(m, 60)
@@ -199,6 +270,14 @@ def run_command(
         None, "--report", "-r",
         help="Write an HTML report to this path after the test (e.g. --report report.html).",
     ),
+    threshold: Optional[list[str]] = typer.Option(
+        None, "--threshold",
+        help=(
+            "SLA threshold in KEY=VALUE format. Overrides thresholds from @scenario. "
+            "Supported keys: p50_ms, p95_ms, p99_ms, max_ms, error_rate. "
+            "Example: --threshold p99_ms=500 --threshold error_rate=1"
+        ),
+    ),
 ):
     """Run a load test scenario against TARGET."""
     if not scenario_file.exists():
@@ -216,6 +295,19 @@ def run_command(
     except ValueError as exc:
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1)
+
+    # Apply --threshold CLI overrides on top of @scenario thresholds.
+    if threshold:
+        for t in threshold:
+            if "=" not in t:
+                console.print(f"[red]Invalid threshold format:[/] {t!r} (expected KEY=VALUE)")
+                raise typer.Exit(1)
+            k, _, v = t.partition("=")
+            try:
+                plan.thresholds[k.strip()] = float(v.strip())
+            except ValueError:
+                console.print(f"[red]Threshold value must be a number:[/] {t!r}")
+                raise typer.Exit(1)
 
     plan_json = plan.model_dump_json(indent=2)
 
@@ -293,14 +385,22 @@ def run_command(
             duration_secs=plan.duration_secs,
             ramp_up_secs=plan.ramp_up_secs,
             output_path=report,
+            thresholds=plan.thresholds,
         )
         console.print(f"  Report         : [cyan]{report}[/]")
+
+    threshold_failed = False
+    if last_metrics and plan.thresholds:
+        threshold_failed = _check_thresholds(last_metrics, plan.thresholds)
 
     if proc.returncode != 0:
         stderr_output = proc.stderr.read() if proc.stderr else ""
         if stderr_output:
             console.print(f"[red]Coordinator stderr:[/]\n{stderr_output}")
         raise typer.Exit(proc.returncode)
+
+    if threshold_failed:
+        raise typer.Exit(1)
 
 
 @agents_app.command("start")

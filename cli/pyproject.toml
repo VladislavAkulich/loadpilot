@@ -16,5 +16,14 @@ loadpilot = "loadpilot.cli:app"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.hooks.custom]
+# hatch_build.py is picked up automatically by hatchling.
+
+[tool.hatch.build.targets.wheel]
+# Include the coordinator binary (placed there by the build hook).
+# The glob covers both Linux/macOS (coordinator) and Windows (coordinator.exe).
+packages = ["loadpilot"]
+artifacts = ["loadpilot/coordinator", "loadpilot/coordinator.exe"]
+
 [tool.ruff]
 line-length = 100

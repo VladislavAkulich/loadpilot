@@ -1,0 +1,138 @@
+name: Release
+
+# Triggered by pushing a version tag: git tag v0.1.0 && git push --tags
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  # ── Build platform wheels ──────────────────────────────────────────────────
+  build-wheels:
+    name: Build wheel (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 — use manylinux container so the wheel is broadly compatible.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            wheel_tag: manylinux_2_28_x86_64
+
+          # Linux ARM64 (e.g. AWS Graviton, Raspberry Pi 4 64-bit).
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            wheel_tag: manylinux_2_28_aarch64
+            cross: true   # use cross-rs for cross-compilation
+
+          # macOS Intel.
+          - os: macos-13
+            target: x86_64-apple-darwin
+            wheel_tag: macosx_13_0_x86_64
+
+          # macOS Apple Silicon (M1/M2/M3).
+          - os: macos-14
+            target: aarch64-apple-darwin
+            wheel_tag: macosx_14_0_arm64
+
+          # Windows x86_64.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            wheel_tag: win_amd64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Rust toolchain ───────────────────────────────────────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # ── cross-rs for Linux ARM64 cross-compilation ───────────────────────────
+      - name: Install cross
+        if: matrix.cross == true
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      # ── Python ───────────────────────────────────────────────────────────────
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install hatchling
+
+      # ── Compile coordinator ──────────────────────────────────────────────────
+      - name: Build coordinator (native)
+        if: matrix.cross != true
+        working-directory: engine
+        run: cargo build --release --package coordinator --target ${{ matrix.target }}
+
+      - name: Build coordinator (cross)
+        if: matrix.cross == true
+        working-directory: engine
+        run: cross build --release --package coordinator --target ${{ matrix.target }}
+
+      # Copy binary into the Python package so hatchling picks it up.
+      - name: Stage binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cp engine/target/${{ matrix.target }}/release/coordinator cli/loadpilot/coordinator
+          chmod +x cli/loadpilot/coordinator
+
+      - name: Stage binary (Windows)
+        if: runner.os == 'Windows'
+        run: Copy-Item engine\target\${{ matrix.target }}\release\coordinator.exe cli\loadpilot\coordinator.exe
+
+      # Build the wheel — skip cargo inside hatch_build.py because binary is already staged.
+      - name: Build wheel
+        working-directory: cli
+        env:
+          LOADPILOT_SKIP_CARGO: "1"
+        run: python -m hatch build --target wheel
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.wheel_tag }}
+          path: cli/dist/*.whl
+
+  # ── Build source distribution (sdist) ─────────────────────────────────────
+  build-sdist:
+    name: Build sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install hatchling
+      - working-directory: cli
+        run: python -m hatch build --target sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: cli/dist/*.tar.gz
+
+  # ── Publish to PyPI ────────────────────────────────────────────────────────
+  publish:
+    name: Publish to PyPI
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    environment: pypi          # configure this env in GitHub repo settings
+    permissions:
+      id-token: write          # needed for PyPI Trusted Publisher (no API token required)
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

@@ -20,6 +20,7 @@ class ScenarioDef:
     ramp_up: str
     tasks: list[TaskDef] = field(default_factory=list)
     cls: Any = None
+    thresholds: dict[str, float] = field(default_factory=dict)
 
 
 class VUser:
@@ -32,13 +33,22 @@ class VUser:
         """Called once per virtual user after all tasks complete. Override to tear down."""
 
 
-def scenario(rps: int = 10, duration: str = "1m", ramp_up: str = "10s"):
+def scenario(
+    rps: int = 10,
+    duration: str = "1m",
+    ramp_up: str = "10s",
+    thresholds: dict[str, float] | None = None,
+):
     """Class decorator that registers a scenario definition.
 
     Args:
         rps: Target requests per second at peak load.
         duration: Total test duration, e.g. "1m", "30s", "2m30s".
         ramp_up: Time to ramp from 0 to target RPS, e.g. "10s", "1m".
+        thresholds: Optional SLA limits. If any are exceeded the CLI exits with
+            code 1. Supported keys: ``p50_ms``, ``p95_ms``, ``p99_ms``,
+            ``max_ms``, ``error_rate`` (percent, e.g. ``1.0`` = 1 %).
+            Example: ``{"p99_ms": 500, "error_rate": 1.0}``
     """
 
     def decorator(cls):
@@ -47,6 +57,7 @@ def scenario(rps: int = 10, duration: str = "1m", ramp_up: str = "10s"):
             rps=rps,
             duration=duration,
             ramp_up=ramp_up,
+            thresholds=thresholds or {},
             cls=cls,
         )
         # Collect tasks from class by inspecting methods for _task_weight attribute

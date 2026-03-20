@@ -40,33 +40,23 @@ Same ergonomics as Locust. Meaningfully faster HTTP execution. No cloud lock-in.
 
 ## Quick Start
 
-### Prerequisites
-
-- Python 3.12+
-- Rust 1.75+ — install via [rustup](https://rustup.rs)
-- `uv` (recommended) or `pip`
-
-### 1. Build the Rust engine
+### Install
 
 ```bash
-cd engine
-cargo build --release
+pip install loadpilot
 ```
 
-### 2. Install the Python CLI
+No Rust, no `cargo build`. The coordinator binary is bundled inside the wheel —
+pip picks the right one for your platform automatically.
 
-```bash
-cd cli
-uv pip install -e .
-```
-
-### 3. Write a scenario
+### Write a scenario
 
 ```python
 # scenarios/health.py
 from loadpilot import VUser, scenario, task
 
-@scenario(rps=30, duration="2m", ramp_up="15s")
+@scenario(rps=30, duration="2m", ramp_up="15s",
+          thresholds={"p99_ms": 500, "error_rate": 1.0})
 class HealthCheckFlow(VUser):
 
     @task(weight=3)
@@ -81,7 +71,7 @@ class HealthCheckFlow(VUser):
         client.get("/")
 ```
 
-### 4. Run
+### Run
 
 ```bash
 loadpilot run scenarios/health.py \
@@ -110,7 +100,12 @@ my-load-tests/
 ```python
 from loadpilot import VUser, scenario, task, LoadClient
 
-@scenario(rps=100, duration="2m", ramp_up="30s")
+@scenario(
+    rps=100,
+    duration="2m",
+    ramp_up="30s",
+    thresholds={"p99_ms": 500, "p95_ms": 300, "error_rate": 1.0},
+)
 class CheckoutFlow(VUser):
 
     def on_start(self, client: LoadClient):
@@ -131,7 +126,7 @@ class CheckoutFlow(VUser):
         client.get("/api/products", headers=self._auth())
 
     def check_browse(self, response) -> None:
-        """Called by the Rust engine after each browse HTTP response.
+        """Called after each browse HTTP response.
         Receives the real response — assert freely."""
         assert response.status_code == 200
         assert isinstance(response.json(), list)
@@ -151,10 +146,44 @@ class CheckoutFlow(VUser):
         return {"Authorization": f"Bearer {self.token}"}
 ```
 
+### Multiple HTTP calls per task
+
+A task can make any number of HTTP calls. Each call is recorded separately in
+metrics (latency, success/fail). No extra annotations needed — it just works:
+
+```python
+@scenario(rps=50, duration="2m", ramp_up="15s")
+class CheckoutFlow(VUser):
+
+    def on_start(self, client: LoadClient):
+        resp = client.post("/auth/login", json={"username": "test", "password": "secret"})
+        self.token = resp.json()["access_token"]
+
+    @task(weight=1)
+    def checkout(self, client: LoadClient):
+        # Step 1 — get the cart
+        cart = client.get("/cart", headers=self._auth())
+        item_id = cart.json()["items"][0]["id"]
+
+        # Step 2 — place the order using data from step 1
+        client.post("/orders", json={"item_id": item_id, "qty": 1}, headers=self._auth())
+
+    def check_checkout(self, response) -> None:
+        # called with the response from the LAST HTTP call in the task
+        assert response.status_code in (200, 201)
+        assert "order_id" in response.json()
+
+    def _auth(self):
+        return {"Authorization": f"Bearer {self.token}"}
+```
+
+Each HTTP call inside `checkout` is measured and counted independently. The
+`check_checkout` method receives the response from the last call in the task.
+
 ### Assertions — `check_{task_name}`
 
 Define an optional `check_{task_name}(self, response)` method alongside any task.
-The Rust engine executes the HTTP request, then calls the check method with the
+The engine executes the HTTP request(s), then calls the check method with the
 real response. Any exception (including `AssertionError`) is counted as an error
 in metrics.
 
@@ -198,11 +227,22 @@ Model your real traffic distribution directly.
 
 ### `@scenario`
 
-| Parameter  | Type  | Default | Description                       |
-|------------|-------|---------|-----------------------------------|
-| `rps`      | `int` | `10`    | Target requests per second        |
-| `duration` | `str` | `"1m"`  | Total run time (`"30s"`, `"2m"`)  |
-| `ramp_up`  | `str` | `"10s"` | Time to reach target RPS from 0   |
+| Parameter    | Type               | Default | Description                                      |
+|--------------|--------------------|---------|--------------------------------------------------|
+| `rps`        | `int`              | `10`    | Target requests per second                       |
+| `duration`   | `str`              | `"1m"`  | Total run time (`"30s"`, `"2m"`)                 |
+| `ramp_up`    | `str`              | `"10s"` | Time to reach target RPS from 0                  |
+| `thresholds` | `dict[str, float]` | `{}`    | SLA limits — test fails with exit code 1 if breached |
+
+Supported threshold keys: `p50_ms`, `p95_ms`, `p99_ms`, `max_ms`, `error_rate` (percent).
+
+```python
+@scenario(
+    rps=50,
+    duration="2m",
+    thresholds={"p99_ms": 500, "error_rate": 1.0},
+)
+```
 
 ### `@task`
 
@@ -240,12 +280,56 @@ client.delete(path, **kwargs)
 loadpilot run <scenario.py> [OPTIONS]
 ```
 
-| Flag         | Default                   | Description                              |
-|--------------|---------------------------|------------------------------------------|
-| `--target`   | `http://localhost:8000`   | Base URL of the system under test        |
-| `--report`   | off                       | Write HTML report to this path           |
-| `--dry-run`  | off                       | Print the generated plan JSON and exit   |
-| `--agents`   | `1`                       | Number of agent processes (MVP: 1)       |
+| Flag          | Default                   | Description                                             |
+|---------------|---------------------------|---------------------------------------------------------|
+| `--target`    | `http://localhost:8000`   | Base URL of the system under test                       |
+| `--report`    | off                       | Write HTML report to this path                          |
+| `--dry-run`   | off                       | Print the generated plan JSON and exit                  |
+| `--agents`    | `1`                       | Number of agent processes (MVP: 1)                      |
+| `--threshold` | from `@scenario`          | Override SLA threshold: `--threshold p99_ms=500`        |
+
+`--threshold` can be repeated and overrides values set in `@scenario(thresholds=...)`.
+
+---
+
+## SLA Thresholds
+
+Thresholds let you fail a CI pipeline automatically when performance degrades.
+
+```python
+@scenario(
+    rps=100,
+    duration="2m",
+    thresholds={
+        "p99_ms":     500,   # p99 latency must be < 500ms
+        "p95_ms":     300,   # p95 latency must be < 300ms
+        "error_rate": 1.0,   # error rate must be < 1%
+    },
+)
+```
+
+After the test, LoadPilot prints a threshold report:
+
+```
+Thresholds
+  ✓  p99 latency       243.0ms  <  500.0ms
+  ✓  p95 latency       158.0ms  <  300.0ms
+  ✓  error rate          0.0%   <    1.0%
+
+All thresholds passed.
+```
+
+Exit code is `1` if any threshold is breached — plug directly into GitHub Actions,
+Jenkins, or any other CI system.
+
+Override thresholds from the command line without editing the scenario file:
+
+```bash
+loadpilot run scenarios/health.py \
+  --target https://staging.api.example.com \
+  --threshold p99_ms=800 \
+  --threshold error_rate=2
+```
 
 ---
 
@@ -259,6 +343,7 @@ loadpilot run scenarios/health.py --target https://api.example.com --report repo
 
 The report includes:
 - Summary cards: total requests, error rate, peak RPS, duration
+- **SLA thresholds**: each threshold shown as ✓ / ✗ with actual vs limit
 - Latency table: p50 / p95 / p99 / max / min / mean
 - RPS chart: actual vs target over time
 - Latency chart: p50 / p95 / p99 over time
@@ -304,11 +389,10 @@ Coordinator (Rust / tokio)
         │     reqwest async HTTP → record success/error
         │
         └── PyO3 mode (on_start / on_stop / check_* present)
-              Phase 1: prepare_task() — Python task runs with MockClient
-                        GIL acquired → URL + method captured → GIL released
-              Phase 2: reqwest HTTP — no GIL held
-              Phase 3: run_check() — GIL acquired → check_{task}(response)
-                        AssertionError → error in metrics → GIL released
+              RustClient (PyO3 pyclass) passed to Python task
+              py.allow_threads(|| reqwest HTTP) — GIL released for I/O
+              GIL re-acquired only for Python assertion check
+              Each HTTP call recorded as separate metric
         │
         ├── stdout (JSON lines, 1/sec) → CLI renders live terminal dashboard
         └── :9090/metrics              → Prometheus / Grafana
@@ -316,14 +400,15 @@ Coordinator (Rust / tokio)
 
 ### PyO3 bridge
 
-The bridge is the key architectural decision. Python tasks run to *capture intent*
-(which URL, which method, which headers) via a `MockClient` that intercepts the
-first HTTP call. Rust executes the real HTTP via `reqwest` without holding the
-Python GIL. After the response arrives, the real status + headers + body are
-passed back to Python for assertion checking.
+The bridge is the key architectural decision. In PyO3 mode a `RustClient` is
+passed directly to the Python task. The task calls `.get()` / `.post()` etc. —
+each call releases the GIL via `py.allow_threads`, executes the HTTP request
+via `reqwest`, and re-acquires the GIL only to run the `check_{task}` assertion.
 
-This keeps the hot I/O path in Rust while preserving full Python expressiveness
-for scenario logic and assertions.
+This means:
+- **Multiple HTTP calls per task** work natively — no annotations needed
+- **GIL is held only for Python code** — the hot I/O path runs without it
+- **Each call is recorded independently** — full per-call latency in metrics
 
 ---
 
@@ -334,11 +419,13 @@ for scenario logic and assertions.
 | **Language** | Scala | JavaScript | Python | **Python** |
 | **HTTP engine** | Netty (async Java) | Go runtime | Python (gevent) | **Rust / reqwest** |
 | **GIL problem** | — | — | Yes | **Partial*** |
+| **Multiple calls per task** | ✅ | ✅ | ✅ | ✅ |
 | **Assertions on response body** | ✅ | ✅ | ✅ | ✅ |
+| **Thresholds / CI fail** | ✅ | ✅ | ❌ | ✅ |
 | **HTML report** | ✅ | ✅ | ✅ | ✅ |
 | **Prometheus metrics** | ✅ | ✅ | ✅ | ✅ |
+| **`pip install` (no build step)** | ✅ | ✅ | ✅ | ✅ |
 | **Distributed (free)** | ❌ paid | ❌ paid | ✅ | planned |
-| **Thresholds / CI fail** | ✅ | ✅ | ❌ | planned |
 | **Web UI** | ✅ | ✅ | ✅ | ❌ (Grafana) |
 
 *GIL is held only during Python callbacks. The HTTP I/O path runs without GIL.
@@ -348,12 +435,11 @@ for scenario logic and assertions.
   LoadPilot's reqwest async keeps going.
 - Against k6 / Gatling — same Python ergonomics your team already knows.
   No JavaScript, no Scala, no JVM.
+- Against all — thresholds with exit code 1, free distributed mode (coming).
 
 **Where LoadPilot is not yet competitive:**
-- Multiple HTTP calls per task (login → get → post in one scenario step)
-- Thresholds (fail CI when p99 > 500ms)
 - Distributed mode (currently single machine only)
-- `pip install` without `cargo build`
+- Web UI (by design — use Grafana)
 
 ---
 
@@ -365,11 +451,11 @@ Current bottlenecks in order of impact:
 `resp.text().await` even when there is no `check_*` method. Unnecessary
 allocation on every request. Fix: skip body read when no PyO3 bridge.
 
-**2. GIL acquisition per request** — in PyO3 mode, two GIL acquisitions happen
-per HTTP request (`prepare_task` + `run_check`). At 10k RPS that is 20k
-GIL acquisitions per second — a hard ceiling.
+**2. GIL acquisition per request** — in PyO3 mode, one GIL acquisition happens
+per HTTP request (for `check_{task}`). At 10k RPS that is 10k GIL acquisitions
+per second — a hard ceiling.
 
-Fix: batch `prepare_task` calls — acquire the GIL once, prepare N requests,
+Fix: batch `check_{task}` calls — acquire the GIL once, check N responses,
 release. One GIL acquisition per 50 requests instead of per 1.
 
 **3. Python 3.13 free-threaded mode** — Python 3.13 ships an experimental
@@ -502,15 +588,34 @@ One flag — no separate process.
 | v0.1 | Python DSL + Rust coordinator, terminal dashboard, Prometheus | ✅ done |
 | v0.2 | PyO3 bridge — on_start / on_stop / assertions on response body | ✅ done |
 | v0.2 | HTML report | ✅ done |
-| v0.3 | Multiple HTTP calls per task | next |
-| v0.3 | Thresholds — fail with exit code 1 on SLA breach | next |
-| v0.3 | `pip install loadpilot` — prebuilt coordinator binaries | next |
+| v0.3 | Multiple HTTP calls per task | ✅ done |
+| v0.3 | Thresholds — fail with exit code 1 on SLA breach | ✅ done |
+| v0.3 | `pip install loadpilot` — prebuilt coordinator binaries | ✅ done |
 | v0.4 | Distributed mode — NATS-based coordinator + remote agents | planned |
 | v0.4 | Agent install script (`curl \| sh`) + embedded NATS | planned |
 | v0.5 | Spike / step / constant load profiles | planned |
 | v1.0 | Benchmark showing 5× Locust throughput | planned |
 
 **Removed from roadmap:** built-in Web UI — Grafana covers this better.
+
+---
+
+## Building from Source
+
+If you want to contribute or build the coordinator yourself:
+
+```bash
+# Prerequisites: Python 3.12+, Rust 1.75+, uv
+
+git clone https://github.com/VladislavAkulich/loadpilot.git
+cd loadpilot
+
+# Build Rust coordinator
+cd engine && cargo build --release && cd ..
+
+# Install Python CLI in editable mode
+cd cli && uv pip install -e .
+```
 
 ---
 
@@ -551,13 +656,9 @@ k6 cloud and Gatling Enterprise charge $300–2000/month for distributed load
 testing. LoadPilot's distributed mode will always be free.
 
 For traction on GitHub the priority order is:
-1. `pip install loadpilot` without requiring `cargo build` (prebuilt binaries)
-2. Multiple HTTP calls per task — unlocks real-world scenarios
-3. Thresholds — makes LoadPilot usable in CI pipelines
-4. Publish the Locust benchmark — the only concrete proof of the value proposition
-
-The project is not trying to compete with k6 or Gatling on features.
-It is trying to be the obvious choice for Python teams that have outgrown Locust.
+1. Publish the Locust benchmark — the only concrete proof of the value proposition
+2. Distributed mode — the main differentiator vs k6 / Gatling on pricing
+3. Spike / step load profiles — covers more CI use cases
 
 ---
 

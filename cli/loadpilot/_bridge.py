@@ -4,6 +4,9 @@ The Rust coordinator calls Python task methods with a MockClient instead of a
 real LoadClient. MockClient records the first HTTP call made by the task
 (method, path, headers, body) and returns a dummy response. Rust then executes
 the real HTTP request via reqwest.
+
+For tasks that make more than one HTTP call, AllCallsMockClient is used by the
+CLI at plan-build time to detect and flag them as multi_call=True.
 """
 from __future__ import annotations
 
@@ -96,3 +99,53 @@ class MockClient:
     def get_call(self) -> tuple[str | None, str | None, dict[str, str], str | None]:
         """Return (method, path, headers, body). Called by Rust via PyO3."""
         return self._method, self._path, self._headers, self._body
+
+
+class AllCallsMockClient:
+    """Like MockClient but records every HTTP call, not just the first.
+
+    Used by the CLI at plan-build time to detect tasks that make multiple
+    HTTP calls and flag them as multi_call=True in the TaskPlan.
+    """
+
+    def __init__(self) -> None:
+        self._calls: list[tuple[str, str]] = []  # (method, path)
+        self._headers: dict[str, str] = {}
+        self._body: str | None = None
+
+    def _record(self, method: str, path: str, kwargs: dict) -> None:
+        self._calls.append((method, path))
+        if len(self._calls) == 1:
+            self._headers = dict(kwargs.get("headers") or {})
+            if "json" in kwargs:
+                self._body = _json.dumps(kwargs["json"])
+
+    def get(self, path: str, **kwargs: Any) -> MockResponse:
+        self._record("GET", path, kwargs)
+        return MockResponse()
+
+    def post(self, path: str, **kwargs: Any) -> MockResponse:
+        self._record("POST", path, kwargs)
+        return MockResponse()
+
+    def put(self, path: str, **kwargs: Any) -> MockResponse:
+        self._record("PUT", path, kwargs)
+        return MockResponse()
+
+    def patch(self, path: str, **kwargs: Any) -> MockResponse:
+        self._record("PATCH", path, kwargs)
+        return MockResponse()
+
+    def delete(self, path: str, **kwargs: Any) -> MockResponse:
+        self._record("DELETE", path, kwargs)
+        return MockResponse()
+
+    def call_count(self) -> int:
+        return len(self._calls)
+
+    def get_first_call(self) -> tuple[str | None, str | None, dict[str, str], str | None]:
+        """Return (method, path, headers, body) of the first call, or Nones."""
+        if not self._calls:
+            return None, None, {}, None
+        method, path = self._calls[0]
+        return method, path, self._headers, self._body

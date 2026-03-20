@@ -35,6 +35,8 @@ class LoadClient:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
         self._last_response: ResponseWrapper | None = None
+        # Each entry is (elapsed_ms, status_code) — populated by run_task path.
+        self._calls: list[tuple[float, int]] = []
         self._client = httpx.Client(
             base_url=self.base_url,
             timeout=httpx.Timeout(30.0),
@@ -49,6 +51,7 @@ class LoadClient:
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         wrapped = ResponseWrapper(response, elapsed_ms)
         self._last_response = wrapped
+        self._calls.append((elapsed_ms, response.status_code))
         return wrapped
 
     def get(self, path: str, **kwargs: Any) -> ResponseWrapper:

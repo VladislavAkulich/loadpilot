@@ -35,6 +35,8 @@ class ScenarioPlan(BaseModel):
     scenario_file: str | None = None
     scenario_class: str | None = None
     n_vusers: int | None = None
+    # SLA thresholds: {metric: max_value}. Checked by CLI after the test.
+    thresholds: dict[str, float] = Field(default_factory=dict)
 
 
 class LatencyStats(BaseModel):

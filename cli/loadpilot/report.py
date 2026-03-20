@@ -21,13 +21,23 @@ def generate(
     duration_secs: int,
     ramp_up_secs: int,
     output_path: Path,
+    thresholds: dict[str, float] | None = None,
 ) -> None:
     """Build and write the HTML report to *output_path*."""
-    html = _build(snapshots, scenario_name, target_url, rps_target, duration_secs, ramp_up_secs)
+    html = _build(snapshots, scenario_name, target_url, rps_target, duration_secs, ramp_up_secs, thresholds or {})
     output_path.write_text(html, encoding="utf-8")
 
 
 # ── Internal builder ──────────────────────────────────────────────────────────
+
+_THRESHOLD_LABELS: dict[str, str] = {
+    "p50_ms":     "p50 latency",
+    "p95_ms":     "p95 latency",
+    "p99_ms":     "p99 latency",
+    "max_ms":     "max latency",
+    "error_rate": "error rate",
+}
+
 
 def _build(
     snapshots: list[AgentMetrics],
@@ -36,6 +46,7 @@ def _build(
     rps_target: int,
     duration_secs: int,
     ramp_up_secs: int,
+    thresholds: dict[str, float] | None = None,
 ) -> str:
     # Exclude the final "done" snapshot from charts (rps=0, target=0).
     chart_snaps = [s for s in snapshots if s.phase != "done"]
@@ -77,6 +88,46 @@ def _build(
     lat_max  = f"{lat.max_ms:.0f}" if lat else "—"
     lat_min  = f"{lat.min_ms:.0f}" if lat else "—"
     lat_mean = f"{lat.mean_ms:.1f}" if lat else "—"
+
+    # ── Threshold rows ─────────────────────────────────────────────────────────
+    thresholds_html = ""
+    if thresholds:
+        actual_vals: dict[str, float] = {
+            "p50_ms":     lat.p50_ms if lat else 0.0,
+            "p95_ms":     lat.p95_ms if lat else 0.0,
+            "p99_ms":     lat.p99_ms if lat else 0.0,
+            "max_ms":     lat.max_ms if lat else 0.0,
+            "error_rate": error_rate,
+        }
+        rows = []
+        for key, limit in thresholds.items():
+            value = actual_vals.get(key)
+            if value is None:
+                continue
+            passed = value <= limit
+            status_cls = "thr-pass" if passed else "thr-fail"
+            icon = "✓" if passed else "✗"
+            unit = "%" if key == "error_rate" else "ms"
+            label = _THRESHOLD_LABELS.get(key, key)
+            rows.append(
+                f'<tr class="{status_cls}">'
+                f'<td class="thr-icon">{icon}</td>'
+                f'<td class="thr-name">{label}</td>'
+                f'<td class="thr-actual">{value:.1f}{unit}</td>'
+                f'<td class="thr-sep">&lt;</td>'
+                f'<td class="thr-limit">{limit:.1f}{unit}</td>'
+                f'</tr>'
+            )
+        if rows:
+            thresholds_html = (
+                '\n  <!-- Thresholds -->\n'
+                '  <div class="section">\n'
+                '    <div class="section-title">SLA Thresholds</div>\n'
+                '    <table class="thr-table">\n'
+                '      <tbody>\n'
+                + "\n".join(f"        {r}" for r in rows)
+                + "\n      </tbody>\n    </table>\n  </div>"
+            )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -156,6 +207,20 @@ def _build(
                    letter-spacing: 0.06em; color: var(--muted); }}
   .config-value {{ font-size: 0.95rem; font-weight: 600; margin-top: 2px; }}
 
+  /* ── Thresholds table ── */
+  .thr-table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
+  .thr-table td {{ padding: 8px 12px; }}
+  .thr-icon {{ font-weight: 800; font-size: 1rem; width: 28px; }}
+  .thr-name {{ font-weight: 600; color: var(--text); min-width: 120px; }}
+  .thr-actual {{ font-weight: 700; text-align: right; width: 90px; }}
+  .thr-sep {{ color: var(--muted); text-align: center; width: 24px; }}
+  .thr-limit {{ color: var(--muted); width: 90px; }}
+  .thr-pass .thr-icon {{ color: var(--success); }}
+  .thr-pass .thr-actual {{ color: var(--success); }}
+  .thr-fail .thr-icon {{ color: var(--error); }}
+  .thr-fail .thr-actual {{ color: var(--error); }}
+  .thr-table tr:not(:last-child) td {{ border-bottom: 1px solid var(--border); }}
+
   /* ── Footer ── */
   footer {{ text-align: center; color: var(--muted); font-size: 0.75rem; padding: 24px 0 8px; }}
   footer a {{ color: var(--primary); text-decoration: none; }}
@@ -204,6 +269,8 @@ def _build(
       <div class="card-sub">ramp-up {_fmt_dur(ramp_up_secs)}</div>
     </div>
   </div>
+
+{thresholds_html}
 
   <!-- Latency strip -->
   <div class="section">
