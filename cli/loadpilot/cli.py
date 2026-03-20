@@ -263,6 +263,14 @@ def run_command(
         "http://localhost:8000", "--target", "-t", help="Base URL of the system under test."
     ),
     agents: int = typer.Option(1, "--agents", "-a", help="Number of agent processes. 1 = single-process mode; >1 = distributed mode with embedded NATS broker."),
+    external_agents: int = typer.Option(
+        0, "--external-agents", "-e",
+        help="Wait for N externally started agents instead of spawning them. Use with --nats-url for remote agents.",
+    ),
+    nats_url: Optional[str] = typer.Option(
+        None, "--nats-url",
+        help="External NATS URL for remote agents (e.g. nats://host:4222). Use with --external-agents.",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print the test plan JSON and exit without running."
     ),
@@ -330,7 +338,11 @@ def run_command(
     )
 
     coordinator_cmd = [str(coordinator)]
-    if agents > 1:
+    if nats_url:
+        coordinator_cmd += ["--nats-url", nats_url, "--external-agents", str(external_agents or 1)]
+    elif external_agents > 0:
+        coordinator_cmd += ["--external-agents", str(external_agents)]
+    elif agents > 1:
         coordinator_cmd += ["--local-agents", str(agents)]
 
     proc = subprocess.Popen(
@@ -390,7 +402,7 @@ def run_command(
             ramp_up_secs=plan.ramp_up_secs,
             output_path=report,
             thresholds=plan.thresholds,
-            n_agents=agents,
+            n_agents=external_agents if external_agents > 0 else agents,
         )
         console.print(f"  Report         : [cyan]{report}[/]")
 

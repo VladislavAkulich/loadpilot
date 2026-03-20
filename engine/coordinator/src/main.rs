@@ -2,6 +2,7 @@ mod broker;
 mod coordinator;
 mod distributed;
 mod metrics;
+mod nats_client;
 mod plan;
 mod prometheus_server;
 mod python_bridge;
@@ -21,7 +22,19 @@ struct Args {
     #[arg(long, default_value = "0")]
     local_agents: usize,
 
-    /// Embedded broker address (used in distributed mode).
+    /// Wait for N externally started agents using the embedded broker.
+    /// Agents must connect to --broker-addr.
+    /// 0 (default) = disabled.
+    #[arg(long, default_value = "0")]
+    external_agents: usize,
+
+    /// Connect to an external NATS server instead of starting an embedded broker.
+    /// Must be used together with --external-agents N.
+    /// Example: --nats-url nats://my-nats.railway.app:4222
+    #[arg(long)]
+    nats_url: Option<String>,
+
+    /// Embedded broker address (used in local and external-agents modes).
     #[arg(long, default_value = "127.0.0.1:4222")]
     broker_addr: String,
 }
@@ -38,7 +51,7 @@ async fn main() -> Result<()> {
     let plan: plan::ScenarioPlan = serde_json::from_str(input.trim())
         .map_err(|e| anyhow::anyhow!("Failed to parse plan JSON: {}\nInput: {}", e, preview))?;
 
-    // Prometheus runs in both modes.
+    // Prometheus runs in all modes.
     let shared_snapshot: SharedSnapshot = Arc::new(RwLock::new(None));
     let prom_snapshot = Arc::clone(&shared_snapshot);
     tokio::spawn(async move {
@@ -47,8 +60,15 @@ async fn main() -> Result<()> {
         }
     });
 
-    if args.local_agents > 0 {
+    if let Some(nats_url) = args.nats_url {
+        if args.external_agents == 0 {
+            anyhow::bail!("--nats-url requires --external-agents N (how many remote agents to wait for)");
+        }
+        distributed::run_with_nats_url(plan, args.external_agents, &nats_url, shared_snapshot).await?;
+    } else if args.local_agents > 0 {
         distributed::run(plan, args.local_agents, &args.broker_addr, shared_snapshot).await?;
+    } else if args.external_agents > 0 {
+        distributed::run_external_agents(plan, args.external_agents, &args.broker_addr, shared_snapshot).await?;
     } else {
         let coord = coordinator::Coordinator::new(plan);
         coord.run(shared_snapshot).await?;

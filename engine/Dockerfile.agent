@@ -1,0 +1,31 @@
+# LoadPilot agent — Docker image for Railway / remote deployments.
+#
+# Build:
+#   docker build -f engine/Dockerfile.agent -t loadpilot-agent .
+#
+# Run:
+#   docker run -e COORDINATOR=nats://host:4222 -e AGENT_ID=agent-0 loadpilot-agent
+#
+# Railway: set COORDINATOR and AGENT_ID as environment variables in the service settings.
+
+# ── Build stage ───────────────────────────────────────────────────────────────
+FROM rust:1.77-slim AS builder
+
+WORKDIR /build
+COPY engine/ .
+
+RUN cargo build --release --package agent
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/agent /usr/local/bin/loadpilot-agent
+RUN chmod +x /usr/local/bin/loadpilot-agent
+
+# Defaults — override via Railway environment variables.
+ENV COORDINATOR=localhost:4222
+ENV AGENT_ID=agent-0
+
+CMD ["sh", "-c", "exec loadpilot-agent --coordinator \"$COORDINATOR\" --agent-id \"$AGENT_ID\""]

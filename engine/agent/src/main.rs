@@ -1,8 +1,11 @@
-/// LoadPilot agent — connects to the embedded NATS broker, receives a plan
-/// shard, runs static HTTP load, and streams metrics back every second.
+/// LoadPilot agent — connects to NATS broker, receives a plan shard,
+/// runs static HTTP load, and streams metrics back every second.
 ///
-/// Usage (launched by coordinator):
-///   agent --coordinator 127.0.0.1:4222 --run-id <uuid> --agent-id agent-0
+/// After completing a run the agent reconnects and waits for the next plan,
+/// making it suitable for long-running Railway/Docker deployments.
+///
+/// Usage:
+///   agent --coordinator <host:port> --agent-id <id>
 
 mod nats;
 mod runner;
@@ -10,7 +13,7 @@ mod runner;
 use anyhow::Result;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use tokio::time::{interval, Duration};
+use tokio::time::{interval, sleep, Duration};
 
 use crate::nats::NatsClient;
 use crate::runner::run_load;
@@ -20,14 +23,17 @@ use crate::runner::run_load;
 #[derive(Parser)]
 #[command(name = "agent")]
 struct Args {
+    /// NATS broker address (coordinator's embedded broker or external NATS).
     #[arg(long)]
     coordinator: String,
 
-    #[arg(long)]
-    run_id: String,
-
+    /// Unique agent identifier. Each agent in a run must have a distinct ID.
     #[arg(long)]
     agent_id: String,
+
+    /// Optional: run ID passed by coordinator (informational only, not required).
+    #[arg(long, default_value = "")]
+    run_id: String,
 }
 
 // ── Wire types ────────────────────────────────────────────────────────────────
@@ -55,6 +61,21 @@ struct ControlMsg {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    loop {
+        match run_once(&args).await {
+            Ok(()) => {
+                eprintln!("[agent {}] run complete — reconnecting in 2s...", args.agent_id);
+                sleep(Duration::from_secs(2)).await;
+            }
+            Err(e) => {
+                eprintln!("[agent {}] error: {e} — reconnecting in 5s...", args.agent_id);
+                sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+async fn run_once(args: &Args) -> Result<()> {
     let mut nats = NatsClient::connect(&args.coordinator).await?;
 
     let shard_subject = format!("loadpilot.shard.{}", args.agent_id);
@@ -67,9 +88,9 @@ async fn main() -> Result<()> {
     let reg = serde_json::to_string(&RegisterMsg { agent_id: args.agent_id.clone() })?;
     nats.publish("loadpilot.register", reg.as_bytes()).await?;
 
-    eprintln!("[agent {}] registered, waiting for plan shard...", args.agent_id);
+    eprintln!("[agent {}] registered — waiting for plan shard...", args.agent_id);
 
-    // Wait for shard plan.
+    // Wait for shard plan or stop signal.
     let plan = loop {
         let (subject, payload) = nats.next_message().await?;
         if subject == shard_subject {
@@ -79,12 +100,15 @@ async fn main() -> Result<()> {
         }
         if subject == "loadpilot.control" {
             if let Ok(ctrl) = serde_json::from_slice::<ControlMsg>(&payload) {
-                if ctrl.command == "stop" { return Ok(()); }
+                if ctrl.command == "stop" {
+                    eprintln!("[agent {}] received stop before shard — will retry", args.agent_id);
+                    return Ok(());
+                }
             }
         }
     };
 
-    // Run load test — returns a channel of metric snapshots.
+    // Run load test.
     let mut metrics_rx = run_load(plan).await;
     let mut tick = interval(Duration::from_secs(1));
 

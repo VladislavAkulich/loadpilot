@@ -1,22 +1,21 @@
 /// Distributed load test coordinator.
 ///
-/// Starts the embedded NATS broker, spawns N local agent processes,
-/// distributes sharded plan to each, aggregates their metrics, and
-/// streams the combined result to stdout (same JSON format as single-process mode).
+/// Three modes:
+///   run()                — embedded NATS broker + N spawned local agents  (original)
+///   run_external_agents()— embedded NATS broker, wait for agents to connect externally
+///   run_with_nats_url()  — connect to external NATS, wait for remote agents (Railway etc.)
 
-use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{path::PathBuf, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::AsyncWriteExt,
     process::Command,
-    sync::Mutex,
     time::{interval, sleep, timeout},
 };
 
 use crate::{
-    broker::{self, BrokerHandle},
+    broker,
     coordinator::{MetricsSnapshot, Phase, SharedSnapshot},
     metrics::LatencySnapshot,
     plan::ScenarioPlan,
@@ -97,11 +96,9 @@ fn aggregate(snapshots: &[AgentMetricsMsg]) -> AggregatedSnapshot {
     let errors_total: u64 = snapshots.iter().map(|s| s.errors_total).sum();
     let active_workers: u64 = snapshots.iter().map(|s| s.active_workers).sum();
 
-    // Phase: "done" only if all agents are done.
     let phase = if snapshots.iter().all(|s| s.phase == "done") {
         "done".to_string()
     } else {
-        // Use the phase of the agent that has progressed furthest.
         let priority = |p: &str| match p {
             "steady" => 2, "ramp_down" => 3, "done" => 4, _ => 1,
         };
@@ -111,8 +108,6 @@ fn aggregate(snapshots: &[AgentMetricsMsg]) -> AggregatedSnapshot {
             .unwrap_or_else(|| "ramp_up".to_string())
     };
 
-    // Latency: weighted average for mean, max of maxes, min of mins,
-    // simple average for percentiles (approximation without histogram merging).
     let total_req = requests_total.max(1) as f64;
     let mean_ms = snapshots.iter()
         .map(|s| s.latency.mean_ms * s.requests_total as f64)
@@ -141,7 +136,6 @@ fn aggregate(snapshots: &[AgentMetricsMsg]) -> AggregatedSnapshot {
 
 fn shard(plan: &ScenarioPlan, n: usize, idx: usize) -> ScenarioPlan {
     let base_rps = plan.rps / n as u64;
-    // Last agent absorbs any remainder.
     let rps = if idx == n - 1 { plan.rps - base_rps * (n - 1) as u64 } else { base_rps };
 
     let n_vusers = plan.n_vusers.map(|v| {
@@ -158,13 +152,11 @@ fn agent_binary() -> Result<PathBuf> {
     let suffix = if cfg!(windows) { ".exe" } else { "" };
     let name = format!("agent{suffix}");
 
-    // 1. Same directory as current binary (installed wheel or cargo run).
     if let Ok(exe) = std::env::current_exe() {
         let candidate = exe.with_file_name(&name);
         if candidate.exists() { return Ok(candidate); }
     }
 
-    // 2. Cargo workspace target directories (dev).
     for profile in ["release", "debug"] {
         let candidate = PathBuf::from(format!("target/{profile}/{name}"));
         if candidate.exists() { return Ok(candidate); }
@@ -176,43 +168,53 @@ fn agent_binary() -> Result<PathBuf> {
     )
 }
 
-// ── Distributed coordinator ───────────────────────────────────────────────────
+// ── Embedded broker coordination (shared by run + run_external_agents) ────────
 
-pub async fn run(plan: ScenarioPlan, n_agents: usize, broker_addr: &str, shared_snapshot: SharedSnapshot) -> Result<()> {
+/// Core coordination loop over an embedded broker.
+/// If `spawn` is true, spawns N local agent processes; otherwise waits for external agents.
+async fn run_with_embedded_broker(
+    plan: ScenarioPlan,
+    n_agents: usize,
+    broker_addr: &str,
+    shared_snapshot: SharedSnapshot,
+    spawn: bool,
+) -> Result<()> {
     eprintln!("[distributed] starting embedded broker on {broker_addr}");
     let broker = broker::start(broker_addr).await
         .with_context(|| format!("Failed to start embedded broker on {broker_addr}"))?;
 
-    // Subscribe to agent registrations and metrics before spawning agents
-    // so we don't miss any messages.
     let mut reg_rx = broker::subscribe(&broker, subject_register()).await;
     let mut metrics_rx = broker::subscribe(&broker, subject_metrics()).await;
 
-    let agent_bin = agent_binary()?;
-    eprintln!("[distributed] spawning {n_agents} agents using {}", agent_bin.display());
-
-    let run_id = uuid::Uuid::new_v4().to_string();
-
-    // Spawn agent processes.
     let mut children = Vec::new();
-    for i in 0..n_agents {
-        let mut child = Command::new(&agent_bin)
-            .arg("--coordinator").arg(broker_addr)
-            .arg("--run-id").arg(&run_id)
-            .arg("--agent-id").arg(format!("agent-{i}"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .with_context(|| format!("Failed to spawn agent {i}"))?;
-        children.push(child);
+
+    if spawn {
+        let agent_bin = agent_binary()?;
+        eprintln!("[distributed] spawning {n_agents} agents using {}", agent_bin.display());
+        let run_id = uuid::Uuid::new_v4().to_string();
+
+        for i in 0..n_agents {
+            let child = Command::new(&agent_bin)
+                .arg("--coordinator").arg(broker_addr)
+                .arg("--agent-id").arg(format!("agent-{i}"))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .with_context(|| format!("Failed to spawn agent {i}"))?;
+            children.push(child);
+        }
+        let _ = run_id; // kept for potential future use
+    } else {
+        eprintln!("[distributed] embedded broker ready — waiting for {n_agents} external agent(s) on {broker_addr}");
     }
 
-    // Wait for all agents to register (timeout: 30s).
-    eprintln!("[distributed] waiting for {n_agents} agent(s) to register...");
+    // Registration timeout: 30s for local agents, 5 min for external.
+    let reg_timeout_secs = if spawn { 30 } else { 300 };
+    eprintln!("[distributed] waiting for {n_agents} agent(s) to register (timeout: {reg_timeout_secs}s)...");
     let mut registered: Vec<String> = Vec::new();
 
-    timeout(Duration::from_secs(30), async {
+    timeout(Duration::from_secs(reg_timeout_secs), async {
         while registered.len() < n_agents {
             if let Some(payload) = reg_rx.recv().await {
                 if let Ok(msg) = serde_json::from_slice::<RegisterMsg>(&payload) {
@@ -223,7 +225,6 @@ pub async fn run(plan: ScenarioPlan, n_agents: usize, broker_addr: &str, shared_
         }
     }).await.context("Timed out waiting for agents to register")?;
 
-    // Send each agent its shard.
     for (idx, agent_id) in registered.iter().enumerate() {
         let shard_plan = shard(&plan, n_agents, idx);
         let msg = ShardMsg { agent_id: agent_id.clone(), plan: shard_plan };
@@ -232,7 +233,27 @@ pub async fn run(plan: ScenarioPlan, n_agents: usize, broker_addr: &str, shared_
         eprintln!("[distributed] sent plan shard to {agent_id} ({} RPS)", msg.plan.rps);
     }
 
-    // Aggregate metrics and stream to stdout until all agents are done.
+    aggregate_loop(&mut metrics_rx, n_agents, &shared_snapshot).await?;
+
+    let stop = serde_json::to_vec(&ControlMsg { command: "stop".to_string() })?;
+    broker::publish(&broker, subject_control(), &stop).await;
+
+    sleep(Duration::from_millis(500)).await;
+
+    for mut child in children {
+        let _ = child.kill().await;
+    }
+
+    Ok(())
+}
+
+/// Metrics aggregation loop — shared by embedded and external NATS modes.
+/// Reads from `metrics_rx`, emits aggregated JSON to stdout, updates Prometheus.
+async fn aggregate_loop(
+    metrics_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    n_agents: usize,
+    shared_snapshot: &SharedSnapshot,
+) -> Result<()> {
     let mut last_snapshots: std::collections::HashMap<String, AgentMetricsMsg> =
         std::collections::HashMap::new();
     let mut tick = interval(Duration::from_secs(1));
@@ -241,8 +262,7 @@ pub async fn run(plan: ScenarioPlan, n_agents: usize, broker_addr: &str, shared_
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                let snaps: Vec<&AgentMetricsMsg> = last_snapshots.values().collect();
-                let agg = aggregate(&snaps.iter().map(|s| AgentMetricsMsg {
+                let snaps: Vec<AgentMetricsMsg> = last_snapshots.values().map(|s| AgentMetricsMsg {
                     agent_id: s.agent_id.clone(),
                     elapsed_secs: s.elapsed_secs,
                     current_rps: s.current_rps,
@@ -252,49 +272,124 @@ pub async fn run(plan: ScenarioPlan, n_agents: usize, broker_addr: &str, shared_
                     active_workers: s.active_workers,
                     phase: s.phase.clone(),
                     latency: s.latency.clone(),
-                }).collect::<Vec<_>>());
+                }).collect();
 
+                let agg = aggregate(&snaps);
                 println!("{}", serde_json::to_string(&agg)?);
-                update_prometheus(&shared_snapshot, &agg);
+                update_prometheus(shared_snapshot, &agg);
 
-                if agg.phase == "done" && last_snapshots.len() == n_agents {
+                if done_count >= n_agents {
                     break;
                 }
             }
 
             Some(payload) = metrics_rx.recv() => {
                 if let Ok(msg) = serde_json::from_slice::<AgentMetricsMsg>(&payload) {
-                    if msg.phase == "done" {
-                        done_count += 1;
-                    }
+                    if msg.phase == "done" { done_count += 1; }
                     last_snapshots.insert(msg.agent_id.clone(), msg);
                 }
             }
         }
+    }
 
-        if done_count >= n_agents {
-            // Emit final snapshot then exit.
-            let snaps: Vec<AgentMetricsMsg> = last_snapshots.into_values().collect();
-            let agg = aggregate(&snaps);
-            println!("{}", serde_json::to_string(&agg)?);
-            update_prometheus(&shared_snapshot, &agg);
-            break;
+    // Final snapshot.
+    let snaps: Vec<AgentMetricsMsg> = last_snapshots.into_values().collect();
+    let agg = aggregate(&snaps);
+    println!("{}", serde_json::to_string(&agg)?);
+    update_prometheus(shared_snapshot, &agg);
+
+    Ok(())
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/// Embedded broker + N spawned local agent processes. Original mode.
+pub async fn run(plan: ScenarioPlan, n_agents: usize, broker_addr: &str, shared_snapshot: SharedSnapshot) -> Result<()> {
+    run_with_embedded_broker(plan, n_agents, broker_addr, shared_snapshot, true).await
+}
+
+/// Embedded broker + wait for N externally started agents (no spawning).
+/// Useful for local testing without Railway: run coordinator, then start agents manually.
+pub async fn run_external_agents(plan: ScenarioPlan, n_agents: usize, broker_addr: &str, shared_snapshot: SharedSnapshot) -> Result<()> {
+    run_with_embedded_broker(plan, n_agents, broker_addr, shared_snapshot, false).await
+}
+
+/// Connect to an external NATS server and wait for N remote agents.
+/// Agents connect to the same NATS independently (e.g. Railway services).
+pub async fn run_with_nats_url(
+    plan: ScenarioPlan,
+    n_agents: usize,
+    nats_url: &str,
+    shared_snapshot: SharedSnapshot,
+) -> Result<()> {
+    use crate::nats_client::NatsClient;
+
+    eprintln!("[distributed] connecting to external NATS at {nats_url}");
+    let mut nats = NatsClient::connect(nats_url).await
+        .with_context(|| format!("Failed to connect to NATS at {nats_url}"))?;
+
+    nats.subscribe(subject_register(), "reg").await?;
+    nats.subscribe(subject_metrics(), "metrics").await?;
+
+    // Wait for N agents (5 min timeout for remote agents).
+    eprintln!("[distributed] waiting for {n_agents} remote agent(s) to register (timeout: 300s)...");
+    let mut registered: Vec<String> = Vec::new();
+
+    let reg_deadline = tokio::time::sleep(Duration::from_secs(300));
+    tokio::pin!(reg_deadline);
+
+    loop {
+        tokio::select! {
+            _ = &mut reg_deadline => {
+                anyhow::bail!(
+                    "Timed out waiting for agents ({}/{} registered). \
+                     Make sure agents are running and can reach {}.",
+                    registered.len(), n_agents, nats_url
+                );
+            }
+            Ok((subject, payload)) = nats.next_message() => {
+                if subject == subject_register() {
+                    if let Ok(msg) = serde_json::from_slice::<RegisterMsg>(&payload) {
+                        eprintln!("[distributed] agent registered: {}", msg.agent_id);
+                        registered.push(msg.agent_id.clone());
+                        if registered.len() >= n_agents { break; }
+                    }
+                }
+            }
         }
     }
 
-    // Update Prometheus snapshot one final time.
-    update_prometheus(&shared_snapshot, &aggregate(&[]));
-
-    // Signal all agents to stop (in case any are still running).
-    let stop = serde_json::to_vec(&ControlMsg { command: "stop".to_string() })?;
-    broker::publish(&broker, subject_control(), &stop).await;
-
-    // Give agents a moment to clean up.
-    sleep(Duration::from_millis(500)).await;
-
-    for mut child in children {
-        let _ = child.kill().await;
+    // Send shards.
+    for (idx, agent_id) in registered.iter().enumerate() {
+        let shard_plan = shard(&plan, n_agents, idx);
+        let msg = ShardMsg { agent_id: agent_id.clone(), plan: shard_plan };
+        let payload = serde_json::to_vec(&msg)?;
+        nats.publish(&subject_shard(agent_id), &payload).await?;
+        eprintln!("[distributed] sent shard to {agent_id} ({} RPS)", msg.plan.rps);
     }
+
+    // Aggregate metrics via a channel fed from the NATS read loop.
+    let (metrics_tx, mut metrics_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+
+    // Spawn a task that reads all remaining NATS messages and routes metrics.
+    tokio::spawn(async move {
+        loop {
+            match nats.next_message().await {
+                Ok((subject, payload)) if subject.starts_with("loadpilot.metrics.") => {
+                    if metrics_tx.send(payload).is_err() { break; }
+                }
+                Ok(_) => {}  // ignore other subjects (register, control echoes)
+                Err(_) => break,
+            }
+        }
+    });
+
+    aggregate_loop(&mut metrics_rx, n_agents, &shared_snapshot).await?;
+
+    // Note: we don't publish "stop" here because we can't — nats was moved into the task.
+    // Remote agents will stop on their own when the plan duration expires.
+
+    sleep(Duration::from_millis(500)).await;
 
     Ok(())
 }
