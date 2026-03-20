@@ -48,9 +48,15 @@ class CustomBuildHook(BuildHookInterface):
             )
         else:
             self.app.display_info("[loadpilot] Building Rust coordinator (cargo build --release)…")
+            env = os.environ.copy()
+            # PyO3 0.23 officially supports up to Python 3.13.
+            # This flag enables forward-compatibility with newer Python versions
+            # via the stable ABI — safe for binary-only use.
+            env.setdefault("PYO3_USE_ABI3_FORWARD_COMPATIBILITY", "1")
             subprocess.run(
                 ["cargo", "build", "--release", "--package", "coordinator"],
                 cwd=str(_ENGINE_DIR),
+                env=env,
                 check=True,
             )
             src = _ENGINE_DIR / "target" / "release" / binary_name
