@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.env
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Rust
+engine/target/
+**/*.rs.bk
+
+# Cargo.lock — library crates omit it; binary crates keep it.
+# LoadPilot ships binaries, so Cargo.lock is committed.
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# LoadPilot generated outputs
+report*.html
+*.html
