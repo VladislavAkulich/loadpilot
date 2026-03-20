@@ -262,7 +262,7 @@ def run_command(
     target: str = typer.Option(
         "http://localhost:8000", "--target", "-t", help="Base URL of the system under test."
     ),
-    agents: int = typer.Option(1, "--agents", "-a", help="Number of agent processes (MVP: 1)."),
+    agents: int = typer.Option(1, "--agents", "-a", help="Number of agent processes. 1 = single-process mode; >1 = distributed mode with embedded NATS broker."),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print the test plan JSON and exit without running."
     ),
@@ -329,8 +329,12 @@ def run_command(
         f"| mode: {bridge_mode}"
     )
 
+    coordinator_cmd = [str(coordinator)]
+    if agents > 1:
+        coordinator_cmd += ["--local-agents", str(agents)]
+
     proc = subprocess.Popen(
-        [str(coordinator)],
+        coordinator_cmd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

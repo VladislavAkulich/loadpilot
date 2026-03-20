@@ -21,7 +21,7 @@ use tokio::time::sleep;
 
 use std::sync::RwLock;
 
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, LatencySnapshot};
 use crate::plan::{ScenarioPlan, TaskPlan};
 use crate::python_bridge::PythonBridge;
 
@@ -50,15 +50,6 @@ pub struct MetricsSnapshot {
     pub phase: Phase,
 }
 
-#[derive(serde::Serialize, Clone)]
-pub struct LatencySnapshot {
-    pub p50_ms: f64,
-    pub p95_ms: f64,
-    pub p99_ms: f64,
-    pub max_ms: f64,
-    pub min_ms: f64,
-    pub mean_ms: f64,
-}
 
 pub struct Coordinator {
     plan: ScenarioPlan,

@@ -28,9 +28,11 @@ engine/target/
 *.swo
 .DS_Store
 
-# Bundled coordinator binary (added by hatch_build.py — never commit)
+# Bundled binaries (added by hatch_build.py — never commit)
 cli/loadpilot/coordinator
 cli/loadpilot/coordinator.exe
+cli/loadpilot/agent
+cli/loadpilot/agent.exe
 
 # LoadPilot generated outputs
 report*.html

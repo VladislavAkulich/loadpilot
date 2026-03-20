@@ -1,3 +1,16 @@
+/// In-memory latency histogram, request counters, and shared snapshot types.
+
+/// Serializable latency snapshot sent in metric reports.
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, Default)]
+pub struct LatencySnapshot {
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub max_ms: f64,
+    pub min_ms: f64,
+    pub mean_ms: f64,
+}
+
 /// In-memory latency histogram and request counters.
 ///
 /// Uses a simple HDR-style bucket array (1ms buckets up to 10s) for

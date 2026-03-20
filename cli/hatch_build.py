@@ -54,15 +54,17 @@ class CustomBuildHook(BuildHookInterface):
             # via the stable ABI — safe for binary-only use.
             env.setdefault("PYO3_USE_ABI3_FORWARD_COMPATIBILITY", "1")
             subprocess.run(
-                ["cargo", "build", "--release", "--package", "coordinator"],
+                ["cargo", "build", "--release", "--package", "coordinator", "--package", "agent"],
                 cwd=str(_ENGINE_DIR),
                 env=env,
                 check=True,
             )
-            src = _ENGINE_DIR / "target" / "release" / binary_name
-            shutil.copy2(src, dst)
-            dst.chmod(dst.stat().st_mode | 0o111)  # ensure executable bit
-            self.app.display_info(f"[loadpilot] Bundled {binary_name} → {dst}")
+            for name in [binary_name, "agent" + ("" if sys.platform != "win32" else ".exe")]:
+                src = _ENGINE_DIR / "target" / "release" / name
+                dst_bin = _PKG_DIR / name
+                shutil.copy2(src, dst_bin)
+                dst_bin.chmod(dst_bin.stat().st_mode | 0o111)
+                self.app.display_info(f"[loadpilot] Bundled {name} → {dst_bin}")
 
         # Tell hatchling to include the binary in the wheel as package data.
         build_data["shared_data"] = {}
