@@ -38,20 +38,18 @@ async fn main() -> Result<()> {
     let plan: plan::ScenarioPlan = serde_json::from_str(input.trim())
         .map_err(|e| anyhow::anyhow!("Failed to parse plan JSON: {}\nInput: {}", e, preview))?;
 
+    // Prometheus runs in both modes.
+    let shared_snapshot: SharedSnapshot = Arc::new(RwLock::new(None));
+    let prom_snapshot = Arc::clone(&shared_snapshot);
+    tokio::spawn(async move {
+        if let Err(e) = prometheus_server::serve(9090, prom_snapshot).await {
+            eprintln!("Prometheus server error: {}", e);
+        }
+    });
+
     if args.local_agents > 0 {
-        // Distributed mode — start embedded broker, spawn agents.
-        distributed::run(plan, args.local_agents, &args.broker_addr).await?;
+        distributed::run(plan, args.local_agents, &args.broker_addr, shared_snapshot).await?;
     } else {
-        // Single-process mode — current behaviour.
-        let shared_snapshot: SharedSnapshot = Arc::new(RwLock::new(None));
-
-        let prom_snapshot = Arc::clone(&shared_snapshot);
-        let _prom_handle = tokio::spawn(async move {
-            if let Err(e) = prometheus_server::serve(9090, prom_snapshot).await {
-                eprintln!("Prometheus server error: {}", e);
-            }
-        });
-
         let coord = coordinator::Coordinator::new(plan);
         coord.run(shared_snapshot).await?;
     }

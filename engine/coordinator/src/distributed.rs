@@ -17,6 +17,7 @@ use tokio::{
 
 use crate::{
     broker::{self, BrokerHandle},
+    coordinator::{MetricsSnapshot, Phase, SharedSnapshot},
     metrics::LatencySnapshot,
     plan::ScenarioPlan,
 };
@@ -177,7 +178,7 @@ fn agent_binary() -> Result<PathBuf> {
 
 // ── Distributed coordinator ───────────────────────────────────────────────────
 
-pub async fn run(plan: ScenarioPlan, n_agents: usize, broker_addr: &str) -> Result<()> {
+pub async fn run(plan: ScenarioPlan, n_agents: usize, broker_addr: &str, shared_snapshot: SharedSnapshot) -> Result<()> {
     eprintln!("[distributed] starting embedded broker on {broker_addr}");
     let broker = broker::start(broker_addr).await
         .with_context(|| format!("Failed to start embedded broker on {broker_addr}"))?;
@@ -254,6 +255,7 @@ pub async fn run(plan: ScenarioPlan, n_agents: usize, broker_addr: &str) -> Resu
                 }).collect::<Vec<_>>());
 
                 println!("{}", serde_json::to_string(&agg)?);
+                update_prometheus(&shared_snapshot, &agg);
 
                 if agg.phase == "done" && last_snapshots.len() == n_agents {
                     break;
@@ -275,9 +277,13 @@ pub async fn run(plan: ScenarioPlan, n_agents: usize, broker_addr: &str) -> Resu
             let snaps: Vec<AgentMetricsMsg> = last_snapshots.into_values().collect();
             let agg = aggregate(&snaps);
             println!("{}", serde_json::to_string(&agg)?);
+            update_prometheus(&shared_snapshot, &agg);
             break;
         }
     }
+
+    // Update Prometheus snapshot one final time.
+    update_prometheus(&shared_snapshot, &aggregate(&[]));
 
     // Signal all agents to stop (in case any are still running).
     let stop = serde_json::to_vec(&ControlMsg { command: "stop".to_string() })?;
@@ -291,4 +297,26 @@ pub async fn run(plan: ScenarioPlan, n_agents: usize, broker_addr: &str) -> Resu
     }
 
     Ok(())
+}
+
+fn update_prometheus(shared: &SharedSnapshot, agg: &AggregatedSnapshot) {
+    let phase = match agg.phase.as_str() {
+        "steady" => Phase::Steady,
+        "done" => Phase::Done,
+        _ => Phase::RampUp,
+    };
+    let snapshot = MetricsSnapshot {
+        timestamp_secs: agg.timestamp_secs,
+        elapsed_secs: agg.elapsed_secs,
+        current_rps: agg.current_rps,
+        target_rps: agg.target_rps,
+        requests_total: agg.requests_total,
+        errors_total: agg.errors_total,
+        active_workers: agg.active_workers,
+        latency: agg.latency.clone(),
+        phase,
+    };
+    if let Ok(mut guard) = shared.write() {
+        *guard = Some(snapshot);
+    }
 }

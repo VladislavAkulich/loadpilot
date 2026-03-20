@@ -46,7 +46,10 @@ struct Sub {
 #[derive(Default)]
 struct State {
     next_id: ClientId,
-    subs: Vec<(String, ClientId, Sub)>, // (pattern, client_id, sub)
+    /// TCP client subscriptions — receive full NATS MSG frame.
+    tcp_subs: Vec<(String, ClientId, Sub)>,
+    /// In-process subscriptions (coordinator itself) — receive raw payload only.
+    internal_subs: Vec<(String, mpsc::UnboundedSender<Vec<u8>>)>,
 }
 
 impl State {
@@ -55,26 +58,37 @@ impl State {
         self.next_id
     }
 
-    fn subscribe(&mut self, pattern: String, cid: ClientId, sid: String, tx: mpsc::UnboundedSender<Vec<u8>>) {
-        self.subs.push((pattern, cid, Sub { sid, tx }));
+    fn subscribe_tcp(&mut self, pattern: String, cid: ClientId, sid: String, tx: mpsc::UnboundedSender<Vec<u8>>) {
+        self.tcp_subs.push((pattern, cid, Sub { sid, tx }));
+    }
+
+    fn subscribe_internal(&mut self, pattern: String, tx: mpsc::UnboundedSender<Vec<u8>>) {
+        self.internal_subs.push((pattern, tx));
     }
 
     fn unsubscribe(&mut self, cid: ClientId, sid: &str) {
-        self.subs.retain(|(_, c, s)| !(*c == cid && s.sid == sid));
+        self.tcp_subs.retain(|(_, c, s)| !(*c == cid && s.sid == sid));
     }
 
     fn disconnect(&mut self, cid: ClientId) {
-        self.subs.retain(|(_, c, _)| *c != cid);
+        self.tcp_subs.retain(|(_, c, _)| *c != cid);
     }
 
     fn publish(&self, subject: &str, payload: &[u8]) {
-        for (pattern, _, sub) in &self.subs {
+        // TCP clients: wrap in NATS MSG frame.
+        for (pattern, _, sub) in &self.tcp_subs {
             if subject_matches(pattern, subject) {
                 let header = format!("MSG {} {} {}\r\n", subject, sub.sid, payload.len());
                 let mut msg = header.into_bytes();
                 msg.extend_from_slice(payload);
                 msg.extend_from_slice(b"\r\n");
                 let _ = sub.tx.send(msg);
+            }
+        }
+        // In-process: send raw payload.
+        for (pattern, tx) in &self.internal_subs {
+            if subject_matches(pattern, subject) {
+                let _ = tx.send(payload.to_vec());
             }
         }
     }
@@ -117,9 +131,7 @@ pub async fn publish(handle: &BrokerHandle, subject: &str, payload: &[u8]) {
 /// Subscribe from the coordinator process. Returns a channel of raw payloads.
 pub async fn subscribe(handle: &BrokerHandle, pattern: &str) -> mpsc::UnboundedReceiver<Vec<u8>> {
     let (tx, rx) = mpsc::unbounded_channel();
-    let mut s = handle.0.lock().await;
-    let cid = s.alloc_id();
-    s.subscribe(pattern.to_string(), cid, format!("internal-{cid}"), tx);
+    handle.0.lock().await.subscribe_internal(pattern.to_string(), tx);
     rx
 }
 
@@ -166,7 +178,7 @@ async fn handle_client(stream: TcpStream, state: Arc<Mutex<State>>) {
             if parts.len() >= 3 {
                 let subject = parts[1].to_string();
                 let sid = parts[parts.len() - 1].to_string();
-                state.lock().await.subscribe(subject, cid, sid, tx.clone());
+                state.lock().await.subscribe_tcp(subject, cid, sid, tx.clone());
             }
         } else if cmd.starts_with("UNSUB") {
             // UNSUB <sid> [max-msgs]

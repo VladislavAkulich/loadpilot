@@ -390,6 +390,7 @@ def run_command(
             ramp_up_secs=plan.ramp_up_secs,
             output_path=report,
             thresholds=plan.thresholds,
+            n_agents=agents,
         )
         console.print(f"  Report         : [cyan]{report}[/]")
 

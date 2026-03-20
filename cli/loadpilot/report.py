@@ -22,9 +22,10 @@ def generate(
     ramp_up_secs: int,
     output_path: Path,
     thresholds: dict[str, float] | None = None,
+    n_agents: int = 1,
 ) -> None:
     """Build and write the HTML report to *output_path*."""
-    html = _build(snapshots, scenario_name, target_url, rps_target, duration_secs, ramp_up_secs, thresholds or {})
+    html = _build(snapshots, scenario_name, target_url, rps_target, duration_secs, ramp_up_secs, thresholds or {}, n_agents)
     output_path.write_text(html, encoding="utf-8")
 
 
@@ -47,6 +48,7 @@ def _build(
     duration_secs: int,
     ramp_up_secs: int,
     thresholds: dict[str, float] | None = None,
+    n_agents: int = 1,
 ) -> str:
     # Exclude the final "done" snapshot from charts (rps=0, target=0).
     chart_snaps = [s for s in snapshots if s.phase != "done"]
@@ -242,6 +244,7 @@ def _build(
     </div>
     <div class="meta">
       <div><b>Target</b> {target_url}</div>
+      {'<div><b>Mode</b> <span style="color:var(--primary);font-weight:700;">distributed &times; ' + str(n_agents) + ' agents</span></div>' if n_agents > 1 else ''}
       <div><b>Generated</b> {ts}</div>
     </div>
   </header>
@@ -344,6 +347,10 @@ def _build(
       <div class="config-item">
         <span class="config-label">Ramp-up</span>
         <span class="config-value">{_fmt_dur(ramp_up_secs)}</span>
+      </div>
+      <div class="config-item">
+        <span class="config-label">Agents</span>
+        <span class="config-value">{"distributed (" + str(n_agents) + ")" if n_agents > 1 else "single"}</span>
       </div>
     </div>
   </div>
