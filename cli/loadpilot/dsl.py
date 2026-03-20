@@ -5,6 +5,11 @@ from typing import Callable, Any
 _scenarios: list["ScenarioDef"] = []
 
 
+def _clear_scenarios() -> None:
+    """Reset the scenario registry. Called before loading each scenario file."""
+    _scenarios.clear()
+
+
 @dataclass
 class TaskDef:
     name: str

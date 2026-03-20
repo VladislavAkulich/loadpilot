@@ -16,7 +16,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 
-from loadpilot.dsl import _scenarios
+from loadpilot.dsl import _scenarios, _clear_scenarios
 from loadpilot.models import AgentMetrics, ScenarioPlan, TaskPlan, parse_duration
 from loadpilot import report as _report
 
@@ -63,6 +63,7 @@ def _find_coordinator_binary() -> Path:
 
 def _load_scenario_file(scenario_file: Path) -> None:
     """Import the scenario file so its @scenario decorators populate _scenarios."""
+    _clear_scenarios()
     scenario_dir = str(scenario_file.parent.resolve())
     if scenario_dir not in sys.path:
         sys.path.insert(0, scenario_dir)
@@ -75,11 +76,20 @@ def _load_scenario_file(scenario_file: Path) -> None:
     spec.loader.exec_module(module)  # type: ignore[union-attr]
 
 
-def _build_plan(scenario_file: Path, target: str) -> ScenarioPlan:
+def _build_plan(scenario_file: Path, target: str, scenario_name: str | None = None) -> ScenarioPlan:
     if not _scenarios:
         raise ValueError("No @scenario classes found in the scenario file.")
 
-    s = _scenarios[0]
+    if scenario_name:
+        matches = [s for s in _scenarios if s.name == scenario_name]
+        if not matches:
+            available = ", ".join(s.name for s in _scenarios)
+            raise ValueError(
+                f"Scenario {scenario_name!r} not found. Available: {available}"
+            )
+        s = matches[0]
+    else:
+        s = _scenarios[0]
 
     # n_vusers: enough VUsers to sustain peak RPS, staggered over ramp-up to
     # avoid triggering server-side rate limits on on_start (e.g. login endpoints).
@@ -262,6 +272,10 @@ def run_command(
     target: str = typer.Option(
         "http://localhost:8000", "--target", "-t", help="Base URL of the system under test."
     ),
+    scenario_name: Optional[str] = typer.Option(
+        None, "--scenario", "-s",
+        help="Scenario class name to run. Required when the file defines multiple @scenario classes.",
+    ),
     agents: int = typer.Option(1, "--agents", "-a", help="Number of agent processes. 1 = single-process mode; >1 = distributed mode with embedded NATS broker."),
     external_agents: int = typer.Option(
         0, "--external-agents", "-e",
@@ -298,8 +312,17 @@ def run_command(
         console.print(f"[red]Error loading scenario:[/] {exc}")
         raise typer.Exit(1)
 
+    if len(_scenarios) > 1 and not scenario_name:
+        console.print("[bold]Scenarios in this file:[/]")
+        for s in _scenarios:
+            console.print(f"  [cyan]{s.name}[/]  {s.rps} RPS · {s.duration}")
+        console.print(
+            f"\nRun with [bold]--scenario <name>[/] to select one."
+        )
+        raise typer.Exit(0)
+
     try:
-        plan = _build_plan(scenario_file, target)
+        plan = _build_plan(scenario_file, target, scenario_name)
     except ValueError as exc:
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1)

@@ -581,8 +581,13 @@ disappears entirely.
 | v0.4 | Distributed mode — embedded NATS + local agents (`--agents N`) | ✅ done |
 | v0.4 | External agents — Railway / remote machines (`--nats-url`) | ✅ done |
 | v0.4 | Agent install script (`curl \| sh`) | ✅ done |
+| v0.5 | Benchmark — LoadPilot vs Locust vs k6, published results | planned |
+| v0.5 | Multiple `@scenario` per file | planned |
+| v0.5 | PyO3 bridge in distributed agents (on_start / check_* over NATS) | planned |
+| v0.5 | Histogram merging for accurate percentiles in distributed mode | planned |
 | v0.5 | Spike / step / constant load profiles | planned |
-| v1.0 | Benchmark showing 5× Locust throughput | planned |
+| v0.5 | GitHub Releases + verify install.sh end-to-end | planned |
+| v1.0 | Production-hardened distributed mode, public benchmark | planned |
 
 **Removed from roadmap:** built-in Web UI — Grafana covers this better.
 
