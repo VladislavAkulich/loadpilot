@@ -280,13 +280,15 @@ client.delete(path, **kwargs)
 loadpilot run <scenario.py> [OPTIONS]
 ```
 
-| Flag          | Default                   | Description                                             |
-|---------------|---------------------------|---------------------------------------------------------|
-| `--target`    | `http://localhost:8000`   | Base URL of the system under test                       |
-| `--report`    | off                       | Write HTML report to this path                          |
-| `--dry-run`   | off                       | Print the generated plan JSON and exit                  |
-| `--agents`    | `1`                       | Number of agent processes (MVP: 1)                      |
-| `--threshold` | from `@scenario`          | Override SLA threshold: `--threshold p99_ms=500`        |
+| Flag                | Default                   | Description                                                    |
+|---------------------|---------------------------|----------------------------------------------------------------|
+| `--target`          | `http://localhost:8000`   | Base URL of the system under test                              |
+| `--report`          | off                       | Write HTML report to this path                                 |
+| `--dry-run`         | off                       | Print the generated plan JSON and exit                         |
+| `--agents`          | `1`                       | Spawn N local agent processes (embedded NATS)                  |
+| `--external-agents` | `0`                       | Wait for N externally started agents (embedded NATS, no spawn) |
+| `--nats-url`        | off                       | Connect to external NATS. Use with `--external-agents`         |
+| `--threshold`       | from `@scenario`          | Override SLA threshold: `--threshold p99_ms=500`               |
 
 `--threshold` can be repeated and overrides values set in `@scenario(thresholds=...)`.
 
@@ -347,9 +349,102 @@ The report includes:
 - Latency table: p50 / p95 / p99 / max / min / mean
 - RPS chart: actual vs target over time
 - Latency chart: p50 / p95 / p99 over time
-- Test configuration
+- Test configuration — including agent count in distributed mode
 
 No external files required — open the `.html` file in any browser.
+
+---
+
+## Distributed Mode
+
+Run a load test across multiple machines with one command. The coordinator
+manages NATS, distributes plan shards, aggregates metrics — the CLI output
+is identical to single-machine mode.
+
+### Local agents (same machine)
+
+Useful for testing distributed mode without extra infrastructure:
+
+```bash
+loadpilot run scenarios/health.py \
+  --target https://api.example.com \
+  --agents 4
+```
+
+Spawns 4 agent processes locally, each handling `rps / 4`.
+
+### External agents (separate machines or Railway)
+
+**Step 1 — install the agent on each machine:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/VladislavAkulich/loadpilot/main/install.sh | sh
+```
+
+Installs `loadpilot-agent` to `/usr/local/bin`. Supports Linux x86_64/aarch64 and macOS x86_64/arm64.
+
+**Step 2 — start the agents** (they wait for a plan, then reconnect automatically):
+
+```bash
+# Machine 1
+loadpilot-agent --coordinator <coordinator-ip>:4222 --agent-id agent-0
+
+# Machine 2
+loadpilot-agent --coordinator <coordinator-ip>:4222 --agent-id agent-1
+```
+
+**Step 3 — run the test** (coordinator uses embedded NATS, agents connect to it):
+
+```bash
+loadpilot run scenarios/health.py \
+  --target https://api.example.com \
+  --external-agents 2
+```
+
+### Railway / external NATS
+
+For cloud deployments, point both coordinator and agents at an external NATS server:
+
+```bash
+# Deploy NATS on Railway (Docker image: nats:latest)
+# Deploy agent services with Dockerfile.agent, set env vars:
+#   COORDINATOR=<nats-tcp-address>
+#   AGENT_ID=agent-0  (agent-1 for the second service)
+
+# Run locally — coordinator connects to Railway NATS, waits for 2 remote agents:
+loadpilot run scenarios/health.py \
+  --target https://api.example.com \
+  --nats-url nats.railway.internal:4222 \
+  --external-agents 2 \
+  --report report.html
+```
+
+Agents are persistent — after completing a run they reconnect to NATS and wait
+for the next plan. Prometheus metrics are exposed on `localhost:9090` by the
+coordinator as usual.
+
+### Architecture
+
+```
+CLI (Python)
+  build plan → spawn coordinator
+        │
+        ▼ stdin (JSON)
+Coordinator (Rust)
+  ├── embedded NATS broker  (or connect to external NATS)
+  ├── wait for N agents to register
+  ├── shard plan → publish to each agent
+  ├── aggregate metrics from all agents (sum RPS, weighted latency)
+  ├── stdout (JSON lines, 1/sec) → CLI live dashboard
+  └── :9090/metrics → Prometheus / Grafana
+
+Agent (Rust, one per machine)
+  ├── connect to NATS
+  ├── register → receive shard
+  ├── run HTTP load (token-bucket scheduler + reqwest)
+  ├── stream metrics → NATS → coordinator
+  └── reconnect and wait for next plan
+```
 
 ---
 
@@ -425,7 +520,7 @@ This means:
 | **HTML report** | ✅ | ✅ | ✅ | ✅ |
 | **Prometheus metrics** | ✅ | ✅ | ✅ | ✅ |
 | **`pip install` (no build step)** | ✅ | ✅ | ✅ | ✅ |
-| **Distributed (free)** | ❌ paid | ❌ paid | ✅ | planned |
+| **Distributed (free)** | ❌ paid | ❌ paid | ✅ | ✅ |
 | **Web UI** | ✅ | ✅ | ✅ | ❌ (Grafana) |
 
 *GIL is held only during Python callbacks. The HTTP I/O path runs without GIL.
@@ -435,10 +530,9 @@ This means:
   LoadPilot's reqwest async keeps going.
 - Against k6 / Gatling — same Python ergonomics your team already knows.
   No JavaScript, no Scala, no JVM.
-- Against all — thresholds with exit code 1, free distributed mode (coming).
+- Against all — thresholds with exit code 1, free distributed mode.
 
 **Where LoadPilot is not yet competitive:**
-- Distributed mode (currently single machine only)
 - Web UI (by design — use Grafana)
 
 ---
@@ -472,113 +566,6 @@ disappears entirely.
 
 *architecture estimate, not yet benchmarked
 
-**Benchmark plan:**
-1. Axum mock HTTP server (localhost, not the bottleneck)
-2. `hey` or `wrk` as the absolute ceiling baseline
-3. LoadPilot static mode vs k6 vs Locust — same scenario, same target
-4. Publish results
-
----
-
-## Distributed Mode (planned v0.4)
-
-The design goal: launch a multi-machine load test with one command, with zero
-infrastructure beyond the machines themselves.
-
-### Architecture
-
-```
-CLI (Python)
-  └── publishes ScenarioPlan → NATS
-          │
-          ├── Coordinator (Rust)
-          │     ├── receives plan
-          │     ├── splits into shards (rps / N agents)
-          │     ├── publishes shard → each agent
-          │     └── aggregates metrics from all agents → CLI stdout
-          │
-          ├── Agent 1 (Rust)  — executes its RPS slice, reports metrics
-          ├── Agent 2 (Rust)
-          └── Agent N (Rust)
-```
-
-NATS subject schema:
-
-```
-loadpilot.plan.{run_id}        CLI → Coordinator     (publish once)
-loadpilot.shard.{agent_id}     Coordinator → Agent   (per agent)
-loadpilot.metrics.{run_id}.*   Agent → Coordinator   (1/sec stream)
-loadpilot.control.{run_id}     Coordinator → Agents  (stop / pause)
-```
-
-Agents are **stateless and fungible** — they self-register on startup and the
-coordinator distributes load automatically. Add or remove agents mid-test;
-the coordinator rebalances.
-
-### Installing agents on remote machines
-
-The agent is a standalone Rust binary — no Python, no Docker required.
-
-**Option 1 — install script (like rustup / Tailscale):**
-
-```bash
-curl -fsSL https://get.loadpilot.dev | sh
-loadpilot-agent install --coordinator 10.0.1.1:4222 --daemon
-# registers as a systemd / launchd service, starts on boot
-```
-
-**Option 2 — uvx (npx equivalent for Python):**
-
-```bash
-uvx loadpilot agent --coordinator 10.0.1.1:4222
-```
-
-No install step. `uvx` downloads from PyPI into an isolated env and runs.
-
-**Option 3 — GitHub release binary:**
-
-```bash
-gh release download v0.4.0 --pattern "loadpilot-agent-linux-x86_64"
-chmod +x loadpilot-agent
-./loadpilot-agent --coordinator 10.0.1.1:4222
-```
-
-### Setting up a persistent load test fleet
-
-```bash
-# One-time setup — provision 3 agent machines:
-for host in 10.0.1.10 10.0.1.11 10.0.1.12; do
-  ssh $host "curl -fsSL https://get.loadpilot.dev | sh && \
-             loadpilot-agent install --coordinator 10.0.1.1:4222 --daemon"
-done
-
-# Every test run — from any laptop:
-loadpilot run scenarios/checkout.py \
-  --nats nats://10.0.1.1:4222 \
-  --target https://staging.api.example.com \
-  --report report.html
-```
-
-The CLI output is identical to single-machine mode — the coordinator aggregates
-all agent metrics into a single stream before forwarding to the CLI.
-
-### Embedded NATS — no separate broker needed
-
-For teams without a dedicated NATS server, the coordinator can run an embedded
-NATS node. Agents connect directly to the coordinator's IP:
-
-```bash
-# Coordinator machine (also runs embedded NATS):
-loadpilot run scenarios/checkout.py \
-  --target https://api.example.com \
-  --listen 0.0.0.0:4222
-
-# Agent machines:
-loadpilot-agent --coordinator 10.0.1.1:4222
-```
-
-One flag — no separate process.
-
 ---
 
 ## Roadmap
@@ -591,8 +578,9 @@ One flag — no separate process.
 | v0.3 | Multiple HTTP calls per task | ✅ done |
 | v0.3 | Thresholds — fail with exit code 1 on SLA breach | ✅ done |
 | v0.3 | `pip install loadpilot` — prebuilt coordinator binaries | ✅ done |
-| v0.4 | Distributed mode — NATS-based coordinator + remote agents | planned |
-| v0.4 | Agent install script (`curl \| sh`) + embedded NATS | planned |
+| v0.4 | Distributed mode — embedded NATS + local agents (`--agents N`) | ✅ done |
+| v0.4 | External agents — Railway / remote machines (`--nats-url`) | ✅ done |
+| v0.4 | Agent install script (`curl \| sh`) | ✅ done |
 | v0.5 | Spike / step / constant load profiles | planned |
 | v1.0 | Benchmark showing 5× Locust throughput | planned |
 
@@ -605,12 +593,12 @@ One flag — no separate process.
 If you want to contribute or build the coordinator yourself:
 
 ```bash
-# Prerequisites: Python 3.12+, Rust 1.75+, uv
+# Prerequisites: Python 3.12+, Rust 1.85+, uv
 
 git clone https://github.com/VladislavAkulich/loadpilot.git
 cd loadpilot
 
-# Build Rust coordinator
+# Build Rust coordinator + agent
 cd engine && cargo build --release && cd ..
 
 # Install Python CLI in editable mode
@@ -657,8 +645,7 @@ testing. LoadPilot's distributed mode will always be free.
 
 For traction on GitHub the priority order is:
 1. Publish the Locust benchmark — the only concrete proof of the value proposition
-2. Distributed mode — the main differentiator vs k6 / Gatling on pricing
-3. Spike / step load profiles — covers more CI use cases
+2. Spike / step load profiles — covers more CI use cases
 
 ---
 
