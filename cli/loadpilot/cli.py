@@ -366,13 +366,28 @@ def run_command(
         raise typer.Exit(1)
 
     if len(_scenarios) > 1 and not scenario_name:
-        console.print("[bold]Scenarios in this file:[/]")
-        for s in _scenarios:
-            console.print(f"  [cyan]{s.name}[/]  {s.rps} RPS · {s.duration}")
-        console.print(
-            f"\nRun with [bold]--scenario <name>[/] to select one."
-        )
-        raise typer.Exit(0)
+        if sys.stdin.isatty():
+            import questionary
+            choices = [
+                questionary.Choice(
+                    title=f"{s.name}  ({s.rps} RPS · {s.duration} · {s.mode})",
+                    value=s.name,
+                )
+                for s in _scenarios
+            ]
+            selected = questionary.select(
+                "Select a scenario to run:",
+                choices=choices,
+            ).ask()
+            if selected is None:
+                raise typer.Exit(0)
+            scenario_name = selected
+        else:
+            console.print("[bold]Scenarios in this file:[/]")
+            for s in _scenarios:
+                console.print(f"  [cyan]{s.name}[/]  {s.rps} RPS · {s.duration} · {s.mode}")
+            console.print("\nRun with [bold]--scenario <name>[/] to select one.")
+            raise typer.Exit(0)
 
     is_distributed = agents > 1 or external_agents > 0 or nats_url is not None
     try:
@@ -509,6 +524,72 @@ def agents_start_command(
         "[dim]Note: In MVP mode, the coordinator and agent run as a single process. "
         "Separate agent mode is planned for v2.[/]"
     )
+
+
+@app.command("init")
+def init_command(
+    directory: Path = typer.Argument(
+        Path("."),
+        help="Directory to initialise. Created if it does not exist.",
+    ),
+):
+    """Scaffold a new LoadPilot project with an example scenario."""
+    directory = directory.resolve()
+    scenarios_dir = directory / "scenarios"
+    scenarios_dir.mkdir(parents=True, exist_ok=True)
+
+    example = scenarios_dir / "example.py"
+    if not example.exists():
+        example.write_text(
+            '''\
+"""
+Example LoadPilot scenario.
+
+Run:
+    loadpilot run scenarios/example.py --target http://localhost:8000
+"""
+
+from loadpilot import LoadClient, VUser, scenario, task
+
+
+@scenario(
+    rps=20,
+    duration="1m",
+    ramp_up="10s",
+    thresholds={"p99_ms": 500, "error_rate": 1.0},
+)
+class ExampleFlow(VUser):
+    """Hits /health (weight 3) and / (weight 1)."""
+
+    @task(weight=3)
+    def health(self, client: LoadClient):
+        client.get("/health")
+
+    @task(weight=1)
+    def root(self, client: LoadClient):
+        client.get("/")
+''',
+            encoding="utf-8",
+        )
+
+    env_example = directory / ".env.example"
+    if not env_example.exists():
+        env_example.write_text(
+            "TARGET_URL=http://localhost:8000\n",
+            encoding="utf-8",
+        )
+
+    console.print(f"[bold green]Initialised LoadPilot project[/] in [cyan]{directory}[/]")
+    console.print()
+    console.print("  [dim]scenarios/example.py[/]  — edit this to write your first scenario")
+    console.print("  [dim].env.example[/]           — copy to .env and set TARGET_URL")
+    console.print()
+    console.print("Run your first test:")
+    try:
+        scenario_path = scenarios_dir.relative_to(Path.cwd()) / "example.py"
+    except ValueError:
+        scenario_path = scenarios_dir / "example.py"
+    console.print(f"  [bold]loadpilot run {scenario_path} --target http://localhost:8000[/]")
 
 
 @app.command("version")
