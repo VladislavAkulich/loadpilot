@@ -252,11 +252,18 @@ Supported threshold keys: `p50_ms`, `p95_ms`, `p99_ms`, `max_ms`, `error_rate` (
 
 ### Lifecycle hooks
 
-| Method                    | When                                          | Client |
-|---------------------------|-----------------------------------------------|--------|
-| `on_start(self, client)`  | Once per VUser, before tasks begin            | Real HTTP (httpx) |
-| `on_stop(self, client)`   | Once per VUser, after test ends               | Real HTTP (httpx) |
-| `check_{task}(self, resp)`| After each task's HTTP response is received   | — |
+| Method                    | When                                          | Client | Distributed |
+|---------------------------|-----------------------------------------------|--------|-------------|
+| `on_start(self, client)`  | Once per VUser, before tasks begin            | Real HTTP (httpx) | ✅ pre-auth pool |
+| `on_stop(self, client)`   | Once per VUser, after test ends               | Real HTTP (httpx) | ❌ skipped |
+| `check_{task}(self, resp)`| After each task's HTTP response is received   | — | ❌ status-based only |
+
+> **Distributed mode note:** `on_start` is supported via a pre-auth pool — the coordinator
+> runs `on_start` N times locally, captures the per-VUser headers, and ships them with the
+> plan so agents can rotate through pre-authenticated header sets in pure Rust.
+> `check_*` is intentionally not supported in distributed mode: response body validation
+> is a functional testing concern, not a load testing one. At high RPS the relevant
+> signal is status code (4xx/5xx), latency, and throughput — not body content.
 
 ### `LoadClient`
 
@@ -541,9 +548,10 @@ This means:
 
 Current bottlenecks in order of impact:
 
-**1. Body reading in static mode** — `execute_request` always calls
-`resp.text().await` even when there is no `check_*` method. Unnecessary
-allocation on every request. Fix: skip body read when no PyO3 bridge.
+**1. Body reading in static mode** — ✅ fixed in v0.4.
+`execute_request` previously called `resp.text().await` on every request even
+when no `check_*` method was present. Body read is now skipped in static mode —
+the response is dropped after status + headers are captured.
 
 **2. GIL acquisition per request** — in PyO3 mode, one GIL acquisition happens
 per HTTP request (for `check_{task}`). At 10k RPS that is 10k GIL acquisitions
@@ -582,9 +590,9 @@ disappears entirely.
 | v0.4 | External agents — Railway / remote machines (`--nats-url`) | ✅ done |
 | v0.4 | Agent install script (`curl \| sh`) | ✅ done |
 | v0.5 | Benchmark — LoadPilot vs Locust vs k6, published results | planned |
-| v0.5 | Multiple `@scenario` per file | planned |
-| v0.5 | PyO3 bridge in distributed agents (on_start / check_* over NATS) | planned |
-| v0.5 | Histogram merging for accurate percentiles in distributed mode | planned |
+| v0.5 | Multiple `@scenario` per file | ✅ done |
+| v0.5 | Pre-auth pool — `on_start` supported in distributed mode | ✅ done |
+| v0.5 | Histogram merging for accurate percentiles in distributed mode | ✅ done |
 | v0.5 | Spike / step / constant load profiles | planned |
 | v0.5 | GitHub Releases + verify install.sh end-to-end | planned |
 | v1.0 | Production-hardened distributed mode, public benchmark | planned |
