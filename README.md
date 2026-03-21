@@ -2,10 +2,8 @@
 
 > Python DSL for writing load test scenarios. Rust engine for executing them.
 
-Write your tests in Python — get near-native HTTP performance.
-
 ```
-LoadPilot — HealthCheckFlow  [02:15]  done: 30/30 RPS
+LoadPilot — HealthCheckFlow  [02:15]  steady: 30/30 RPS
 
   Requests/sec:      30.0      Total:     3,825
   Errors:             0.0%     Failed:         0
@@ -19,83 +17,61 @@ LoadPilot — HealthCheckFlow  [02:15]  done: 30/30 RPS
   [████████████████████] 100%
 ```
 
+Write your scenarios in Python. The HTTP engine runs in Rust.
+
 ---
 
-## Why LoadPilot
+## What it is
 
-The existing tools each have a real problem:
+LoadPilot is a load testing tool for teams that want to write scenarios in Python
+without the throughput ceiling of a pure-Python engine.
 
-| Tool | Problem |
-|---|---|
-| **Locust** | Python GIL limits single-machine throughput to ~1–5k RPS |
-| **k6** | JavaScript — context switch for Python teams |
-| **Gatling** | Scala DSL — high barrier to entry |
-| **k6 / Gatling** | Distributed mode is paid ($300–2000/month) |
+- Scenarios are plain Python classes — no new DSL to learn
+- HTTP execution runs in async Rust via reqwest
+- Distributed mode is built-in and free — run agents on any machine or cloud
 
-LoadPilot's position: **Locust-compatible Python DSL + Rust HTTP engine + forever free**.
+→ [Getting started in 5 minutes](docs/getting-started.md)
 
-Same ergonomics as Locust. Meaningfully faster HTTP execution. No cloud lock-in.
+---
+
+## Features
+
+- **Python DSL** — `@scenario`, `@task`, `on_start`, `check_*`
+- **Load profiles** — ramp, constant, step, spike
+- **Thresholds** — fail CI with exit code 1 on SLA breach
+- **Distributed mode** — coordinator + N agents over NATS, free
+- **HTML report** — self-contained, no server required
+- **Prometheus metrics** — live Grafana dashboards while the test runs
+- **Interactive TUI** — `loadpilot run` with no args opens a scenario browser
+- **`pip install`** — coordinator binary bundled in the wheel, no Rust needed
 
 ---
 
 ## Quick Start
 
-### Install
-
 ```bash
 pip install loadpilot
-```
 
-No Rust, no `cargo build`. The coordinator binary is bundled inside the wheel —
-pip picks the right one for your platform automatically.
+# scaffold a project
+loadpilot init my-load-tests
+cd my-load-tests
 
-### Write a scenario
+# run interactively — pick scenario from TUI
+loadpilot run --target https://your-api.example.com
 
-```python
-# scenarios/health.py
-from loadpilot import VUser, scenario, task
-
-@scenario(rps=30, duration="2m", ramp_up="15s",
-          thresholds={"p99_ms": 500, "error_rate": 1.0})
-class HealthCheckFlow(VUser):
-
-    @task(weight=3)
-    def health(self, client):
-        client.get("/health")
-
-    def check_health(self, response):
-        assert response.status_code == 200
-
-    @task(weight=1)
-    def root(self, client):
-        client.get("/")
-```
-
-### Run
-
-```bash
-loadpilot run scenarios/health.py \
+# or run directly
+loadpilot run scenarios/example.py \
   --target https://your-api.example.com \
   --report report.html
 ```
+
+→ [Full getting started guide](docs/getting-started.md)
 
 ---
 
 ## Writing Scenarios
 
-### Project structure
-
-```
-my-load-tests/
-├── scenarios/
-│   ├── health_check_flow.py
-│   ├── authenticated_read_flow.py
-│   └── project_crud_flow.py
-├── helpers.py
-└── README.md
-```
-
-### Full scenario anatomy
+### Scenario anatomy
 
 ```python
 from loadpilot import VUser, scenario, task, LoadClient
@@ -109,25 +85,15 @@ from loadpilot import VUser, scenario, task, LoadClient
 class CheckoutFlow(VUser):
 
     def on_start(self, client: LoadClient):
-        """Runs once per virtual user before tasks start.
-        Real HTTP — use for login, token retrieval, test data setup."""
-        resp = client.post("/auth/login", json={
-            "username": "testuser",
-            "password": "secret",
-        })
+        """Runs once per virtual user before tasks start."""
+        resp = client.post("/auth/login", json={"username": "test", "password": "secret"})
         self.token = resp.json()["access_token"]
-
-    def on_stop(self, client: LoadClient):
-        """Optional cleanup after the virtual user finishes."""
-        client.post("/auth/logout", headers=self._auth())
 
     @task(weight=5)
     def browse(self, client: LoadClient):
         client.get("/api/products", headers=self._auth())
 
     def check_browse(self, response) -> None:
-        """Called after each browse HTTP response.
-        Receives the real response — assert freely."""
         assert response.status_code == 200
         assert isinstance(response.json(), list)
 
@@ -148,78 +114,34 @@ class CheckoutFlow(VUser):
 
 ### Multiple HTTP calls per task
 
-A task can make any number of HTTP calls. Each call is recorded separately in
-metrics (latency, success/fail). No extra annotations needed — it just works:
-
-```python
-@scenario(rps=50, duration="2m", ramp_up="15s")
-class CheckoutFlow(VUser):
-
-    def on_start(self, client: LoadClient):
-        resp = client.post("/auth/login", json={"username": "test", "password": "secret"})
-        self.token = resp.json()["access_token"]
-
-    @task(weight=1)
-    def checkout(self, client: LoadClient):
-        # Step 1 — get the cart
-        cart = client.get("/cart", headers=self._auth())
-        item_id = cart.json()["items"][0]["id"]
-
-        # Step 2 — place the order using data from step 1
-        client.post("/orders", json={"item_id": item_id, "qty": 1}, headers=self._auth())
-
-    def check_checkout(self, response) -> None:
-        # called with the response from the LAST HTTP call in the task
-        assert response.status_code in (200, 201)
-        assert "order_id" in response.json()
-
-    def _auth(self):
-        return {"Authorization": f"Bearer {self.token}"}
-```
-
-Each HTTP call inside `checkout` is measured and counted independently. The
-`check_checkout` method receives the response from the last call in the task.
-
-### Assertions — `check_{task_name}`
-
-Define an optional `check_{task_name}(self, response)` method alongside any task.
-The engine executes the HTTP request(s), then calls the check method with the
-real response. Any exception (including `AssertionError`) is counted as an error
-in metrics.
-
 ```python
 @task(weight=1)
-def get_user(self, client):
-    client.get(f"/users/{self.user_id}")
+def checkout(self, client: LoadClient):
+    cart = client.get("/cart", headers=self._auth())
+    item_id = cart.json()["items"][0]["id"]
+    client.post("/orders", json={"item_id": item_id, "qty": 1}, headers=self._auth())
 
-def check_get_user(self, response) -> None:
-    assert response.status_code == 200
-    data = response.json()
-    assert data["id"] == self.user_id
-    assert "email" in data
+def check_checkout(self, response) -> None:
+    assert response.status_code in (200, 201)
 ```
 
-`response` exposes: `.status_code`, `.ok`, `.text`, `.headers`, `.json()`, `.raise_for_status()`.
+Each HTTP call inside a task is measured independently. `check_checkout` receives
+the response from the last call.
 
-If no check method is defined — the request is counted as an error only when
-the HTTP status is 4xx or 5xx.
+### Multiple scenarios in one file
 
-### `weight` — task frequency
+```python
+@scenario(rps=30, duration="1m")
+class LightFlow(VUser): ...
 
-`weight` controls the relative frequency of task selection within one scheduler
-cycle. It is deterministic, not random:
-
-```
-tasks: health(weight=3), root(weight=1)  →  total_weight=4
-
-index % 4:  0 → health
-            1 → health
-            2 → health
-            3 → root
+@scenario(rps=100, duration="2m", mode="spike")
+class HeavyFlow(VUser): ...
 ```
 
-At 100 RPS with weights 70/20/10 you get exactly 70/20/10 RPS per task.
-Model your real traffic distribution directly.
+```bash
+loadpilot run scenarios/flows.py --scenario HeavyFlow --target https://api.example.com
+# or omit --scenario to pick interactively
+```
 
 ---
 
@@ -227,114 +149,127 @@ Model your real traffic distribution directly.
 
 ### `@scenario`
 
-| Parameter    | Type               | Default    | Description                                      |
-|--------------|--------------------|------------|--------------------------------------------------|
-| `rps`        | `int`              | `10`       | Target requests per second at peak load          |
-| `duration`   | `str`              | `"1m"`     | Steady-state duration for `ramp`; total duration for all other modes |
-| `ramp_up`    | `str`              | `"10s"`    | Ramp-up window (used only by `mode="ramp"`)      |
-| `mode`       | `str`              | `"ramp"`   | Load profile — see table below                   |
-| `steps`      | `int`              | `5`        | Number of steps for `mode="step"`                |
-| `thresholds` | `dict[str, float]` | `{}`       | SLA limits — test fails with exit code 1 if breached |
+| Parameter    | Type               | Default    | Description |
+|--------------|--------------------|------------|-------------|
+| `rps`        | `int`              | `10`       | Target RPS at peak load |
+| `duration`   | `str`              | `"1m"`     | Steady-state duration for `ramp`; total for other modes |
+| `ramp_up`    | `str`              | `"10s"`    | Ramp-up window (used only by `mode="ramp"`) |
+| `mode`       | `str`              | `"ramp"`   | Load profile |
+| `steps`      | `int`              | `5`        | Steps for `mode="step"` |
+| `thresholds` | `dict[str, float]` | `{}`       | SLA limits — exit 1 if breached |
 
-#### Load profiles
+### Load profiles
 
-| Mode        | Behaviour |
-|-------------|-----------|
-| `ramp`      | Linear ramp from 0 → target RPS over `ramp_up`, then steady. Total = `duration + ramp_up`. |
-| `constant`  | Full target RPS immediately, no ramp. Total = `duration`. |
-| `step`      | Divide `duration` into `steps` equal windows; each window runs at `rps × step/steps`. |
-| `spike`     | Divide `duration` into thirds: 20% RPS (baseline) → 100% RPS (spike) → 20% RPS (recovery). |
+| Mode       | Behaviour |
+|------------|-----------|
+| `ramp`     | Linear ramp 0 → target RPS over `ramp_up`, then steady. Total = `duration + ramp_up`. |
+| `constant` | Full RPS immediately, no ramp. Total = `duration`. |
+| `step`     | Divide `duration` into `steps` equal windows; RPS increases each step. |
+| `spike`    | Thirds: 20% RPS (baseline) → 100% RPS (spike) → 20% RPS (recovery). |
 
 ```python
-# ramp (default)
-@scenario(rps=100, duration="2m", ramp_up="15s", mode="ramp")
-
-# constant — no warm-up, full load immediately
+@scenario(rps=100, duration="2m", ramp_up="15s", mode="ramp")    # default
 @scenario(rps=100, duration="2m", mode="constant")
-
-# step — 5 steps: 20 → 40 → 60 → 80 → 100 RPS, 30s each
 @scenario(rps=100, duration="2m30s", mode="step", steps=5)
-
-# spike — 20 RPS for 40s, burst to 100 RPS for 40s, recover for 40s
 @scenario(rps=100, duration="2m", mode="spike")
 ```
 
-Supported threshold keys: `p50_ms`, `p95_ms`, `p99_ms`, `max_ms`, `error_rate` (percent).
+All profiles work in distributed mode.
 
 ### `@task`
 
-| Parameter | Type  | Default | Description                               |
-|-----------|-------|---------|-------------------------------------------|
-| `weight`  | `int` | `1`     | Relative frequency vs other tasks         |
+| Parameter | Type  | Default | Description |
+|-----------|-------|---------|-------------|
+| `weight`  | `int` | `1`     | Relative frequency vs other tasks |
 
 ### Lifecycle hooks
 
-| Method                    | When                                          | Client | Distributed |
-|---------------------------|-----------------------------------------------|--------|-------------|
-| `on_start(self, client)`  | Once per VUser, before tasks begin            | Real HTTP (httpx) | ✅ pre-auth pool |
-| `on_stop(self, client)`   | Once per VUser, after test ends               | Real HTTP (httpx) | ❌ skipped |
-| `check_{task}(self, resp)`| After each task's HTTP response is received   | — | ❌ status-based only |
+| Method                    | When | Client | Distributed |
+|---------------------------|------|--------|-------------|
+| `on_start(self, client)`  | Once per VUser, before tasks | Real HTTP (httpx) | ✅ pre-auth pool |
+| `on_stop(self, client)`   | Once per VUser, after test   | Real HTTP (httpx) | ❌ skipped |
+| `check_{task}(self, resp)`| After each task's HTTP response | — | ❌ status-based only |
 
-> **Distributed mode note:** `on_start` is supported via a pre-auth pool — the coordinator
-> runs `on_start` N times locally, captures the per-VUser headers, and ships them with the
-> plan so agents can rotate through pre-authenticated header sets in pure Rust.
-> `check_*` is intentionally not supported in distributed mode: response body validation
-> is a functional testing concern, not a load testing one. At high RPS the relevant
-> signal is status code (4xx/5xx), latency, and throughput — not body content.
+> In distributed mode `on_start` runs on the coordinator, captures per-VUser
+> headers, and ships them with the plan. Agents rotate through pre-authenticated
+> header sets in pure Rust. `check_*` is intentionally skipped — at high RPS
+> the signal is status code, latency, and throughput, not body content.
 
 ### `LoadClient`
 
 Thin wrapper around [httpx](https://www.python-httpx.org/).
 
 ```python
-client.get(path, **kwargs)     # → ResponseWrapper
+client.get(path, **kwargs)
 client.post(path, **kwargs)
 client.put(path, **kwargs)
 client.patch(path, **kwargs)
 client.delete(path, **kwargs)
 ```
 
-`ResponseWrapper`: `.status_code`, `.ok`, `.text`, `.headers`, `.json()`, `.elapsed_ms`, `.raise_for_status()`.
+`ResponseWrapper`: `.status_code`, `.ok`, `.text`, `.headers`, `.json()`,
+`.elapsed_ms`, `.raise_for_status()`.
 
 ---
 
 ## CLI Reference
 
 ```bash
-loadpilot run <scenario.py> [OPTIONS]
+loadpilot run [SCENARIO_FILE] [OPTIONS]
+loadpilot init [DIRECTORY]
+loadpilot version
 ```
 
-| Flag                | Default                   | Description                                                    |
-|---------------------|---------------------------|----------------------------------------------------------------|
-| `--target`          | `http://localhost:8000`   | Base URL of the system under test                              |
-| `--report`          | off                       | Write HTML report to this path                                 |
-| `--dry-run`         | off                       | Print the generated plan JSON and exit                         |
-| `--agents`          | `1`                       | Spawn N local agent processes (embedded NATS)                  |
-| `--external-agents` | `0`                       | Wait for N externally started agents (embedded NATS, no spawn) |
-| `--nats-url`        | off                       | Connect to external NATS. Use with `--external-agents`         |
-| `--threshold`       | from `@scenario`          | Override SLA threshold: `--threshold p99_ms=500`               |
+### `loadpilot run`
 
-`--threshold` can be repeated and overrides values set in `@scenario(thresholds=...)`.
+Omit `SCENARIO_FILE` to open the interactive scenario browser (TTY only).
+
+| Flag                | Default                 | Description |
+|---------------------|-------------------------|-------------|
+| `--target`          | `http://localhost:8000` | Base URL of the system under test |
+| `--scenario`        | —                       | Scenario class name (required when file has multiple) |
+| `--report`          | off                     | Write HTML report to this path |
+| `--dry-run`         | off                     | Print the generated plan JSON and exit |
+| `--agents`          | `1`                     | Spawn N local agent processes (embedded NATS) |
+| `--external-agents` | `0`                     | Wait for N externally started agents |
+| `--nats-url`        | —                       | Connect to external NATS (use with `--external-agents`) |
+| `--threshold`       | from `@scenario`        | Override SLA threshold: `--threshold p99_ms=500` |
+
+### `loadpilot init`
+
+Scaffolds a new project:
+
+```bash
+loadpilot init my-load-tests
+```
+
+Creates `scenarios/example.py`, `.env.example`, and `monitoring/` (Prometheus +
+Grafana stack, pre-configured with the LoadPilot dashboard). Safe to run on an
+existing directory — does not overwrite existing files.
+
+```bash
+# Start live monitoring in one command
+docker compose -f monitoring/docker-compose.yml up -d
+# Grafana → http://localhost:3000  (LoadPilot dashboard auto-imported)
+```
 
 ---
 
 ## SLA Thresholds
-
-Thresholds let you fail a CI pipeline automatically when performance degrades.
 
 ```python
 @scenario(
     rps=100,
     duration="2m",
     thresholds={
-        "p99_ms":     500,   # p99 latency must be < 500ms
-        "p95_ms":     300,   # p95 latency must be < 300ms
-        "error_rate": 1.0,   # error rate must be < 1%
+        "p99_ms":     500,
+        "p95_ms":     300,
+        "error_rate": 1.0,   # percent
     },
 )
 ```
 
-After the test, LoadPilot prints a threshold report:
+After the test:
 
 ```
 Thresholds
@@ -345,10 +280,7 @@ Thresholds
 All thresholds passed.
 ```
 
-Exit code is `1` if any threshold is breached — plug directly into GitHub Actions,
-Jenkins, or any other CI system.
-
-Override thresholds from the command line without editing the scenario file:
+Exit code `1` on breach. Override from CLI without editing the file:
 
 ```bash
 loadpilot run scenarios/health.py \
@@ -361,91 +293,72 @@ loadpilot run scenarios/health.py \
 
 ## HTML Report
 
-Pass `--report report.html` to generate a self-contained HTML report after the test:
-
 ```bash
 loadpilot run scenarios/health.py --target https://api.example.com --report report.html
 ```
 
-The report includes:
-- Summary cards: total requests, error rate, peak RPS, duration
-- **SLA thresholds**: each threshold shown as ✓ / ✗ with actual vs limit
-- Latency table: p50 / p95 / p99 / max / min / mean
-- RPS chart: actual vs target over time
-- Latency chart: p50 / p95 / p99 over time
-- Test configuration — including agent count in distributed mode
+Includes: summary cards, SLA threshold results, latency table (p50/p95/p99/max),
+RPS chart (actual vs target), latency chart over time, agent count in distributed mode.
 
-No external files required — open the `.html` file in any browser.
+Self-contained — open in any browser, no server required.
+Parent directory is created automatically if it does not exist.
 
 ---
 
 ## Distributed Mode
 
-Run a load test across multiple machines with one command. The coordinator
-manages NATS, distributes plan shards, aggregates metrics — the CLI output
-is identical to single-machine mode.
+Run a test across multiple machines. The CLI output is identical to single-machine
+mode — coordinator aggregates everything transparently.
 
-### Local agents (same machine)
-
-Useful for testing distributed mode without extra infrastructure:
+### Local agents
 
 ```bash
-loadpilot run scenarios/health.py \
-  --target https://api.example.com \
-  --agents 4
+loadpilot run scenarios/health.py --target https://api.example.com --agents 4
 ```
 
-Spawns 4 agent processes locally, each handling `rps / 4`.
+Spawns 4 local agent processes, each handling `rps / 4`.
 
-### External agents (separate machines or Railway)
-
-**Step 1 — install the agent on each machine:**
+### External agents (separate machines)
 
 ```bash
+# Install agent on each machine
 curl -fsSL https://raw.githubusercontent.com/VladislavAkulich/loadpilot/main/install.sh | sh
-```
 
-Installs `loadpilot-agent` to `/usr/local/bin`. Supports Linux x86_64/aarch64 and macOS x86_64/arm64.
-
-**Step 2 — start the agents** (they wait for a plan, then reconnect automatically):
-
-```bash
-# Machine 1
+# Start agents — they wait for a plan, complete it, then reconnect automatically
 loadpilot-agent --coordinator <coordinator-ip>:4222 --agent-id agent-0
-
-# Machine 2
 loadpilot-agent --coordinator <coordinator-ip>:4222 --agent-id agent-1
-```
 
-**Step 3 — run the test** (coordinator uses embedded NATS, agents connect to it):
-
-```bash
+# Run test — coordinator uses embedded NATS
 loadpilot run scenarios/health.py \
   --target https://api.example.com \
-  --external-agents 2
-```
-
-### Railway / external NATS
-
-For cloud deployments, point both coordinator and agents at an external NATS server:
-
-```bash
-# Deploy NATS on Railway (Docker image: nats:latest)
-# Deploy agent services with Dockerfile.agent, set env vars:
-#   COORDINATOR=<nats-tcp-address>
-#   AGENT_ID=agent-0  (agent-1 for the second service)
-
-# Run locally — coordinator connects to Railway NATS, waits for 2 remote agents:
-loadpilot run scenarios/health.py \
-  --target https://api.example.com \
-  --nats-url nats.railway.internal:4222 \
   --external-agents 2 \
   --report report.html
 ```
 
-Agents are persistent — after completing a run they reconnect to NATS and wait
-for the next plan. Prometheus metrics are exposed on `localhost:9090` by the
-coordinator as usual.
+### Railway / external NATS
+
+```bash
+# Deploy NATS on Railway (Docker image: nats:latest, TCP port 4222)
+# Deploy agent services with Dockerfile.agent, env vars:
+#   COORDINATOR=<nats-tcp-address>
+#   AGENT_ID=agent-0
+
+loadpilot run scenarios/health.py \
+  --target https://api.example.com \
+  --nats-url nats://monorail.proxy.rlwy.net:PORT \
+  --external-agents 2 \
+  --report report.html
+```
+
+Agents are persistent — after a run they reconnect and wait for the next plan.
+
+### Reliability
+
+- **Synchronised start**: all agents begin within ~1ms of each other (coordinator
+  sends `start_at` timestamp, agents sleep until it)
+- **Agent timeout**: if an agent stops reporting for 15s it is marked timed-out;
+  the test completes on the remaining agents without hanging
+- **Agent recovery**: if a timed-out agent reconnects it is restored to the pool
 
 ### Architecture
 
@@ -457,15 +370,15 @@ CLI (Python)
 Coordinator (Rust)
   ├── embedded NATS broker  (or connect to external NATS)
   ├── wait for N agents to register
-  ├── shard plan → publish to each agent
-  ├── aggregate metrics from all agents (sum RPS, weighted latency)
-  ├── stdout (JSON lines, 1/sec) → CLI live dashboard
+  ├── shard plan + set synchronised start_at → publish to each agent
+  ├── aggregate metrics (sum RPS, histogram-merged percentiles)
+  ├── stdout JSON lines → CLI live dashboard
   └── :9090/metrics → Prometheus / Grafana
 
 Agent (Rust, one per machine)
-  ├── connect to NATS
-  ├── register → receive shard
-  ├── run HTTP load (token-bucket scheduler + reqwest)
+  ├── connect to NATS → register → receive shard
+  ├── sleep until start_at (clock sync)
+  ├── run HTTP load (token-bucket + reqwest)
   ├── stream metrics → NATS → coordinator
   └── reconnect and wait for next plan
 ```
@@ -474,7 +387,7 @@ Agent (Rust, one per machine)
 
 ## Metrics
 
-Prometheus metrics are exposed on port **9090** while a test is running:
+Prometheus metrics on port **9090** while a test is running:
 
 ```bash
 curl http://localhost:9090/metrics
@@ -482,11 +395,9 @@ curl http://localhost:9090/metrics
 
 Point a Prometheus scrape job at `host:9090` for live Grafana dashboards.
 
-**On Grafana vs a built-in Web UI:**
-LoadPilot deliberately has no browser-based control UI. Grafana gives you
-real-time correlation of load test metrics with your service's own metrics
-(CPU, DB latency, error rates) — which a standalone UI can never provide.
-The HTML report covers the "share results with stakeholders" use case.
+LoadPilot deliberately has no built-in web UI. Grafana lets you correlate load
+test metrics with your service's own metrics (CPU, DB latency, error rates) —
+something a standalone UI can't provide.
 
 ---
 
@@ -497,7 +408,7 @@ CLI (Python)
   load scenario file
   introspect @scenario classes
   pre-run each @task with MockClient → extract URL + method
-  detect on_start / on_stop / check_* → enable PyO3 bridge
+  detect on_start / check_* → enable PyO3 bridge
   build JSON plan → spawn coordinator binary
         │
         ▼ stdin (JSON)
@@ -506,100 +417,16 @@ Coordinator (Rust / tokio)
         │
         ├── Static mode (no Python callbacks)
         │     reqwest async HTTP → record success/error
+        │     body not read (no check_* to feed)
         │
-        └── PyO3 mode (on_start / on_stop / check_* present)
+        └── PyO3 mode (on_start / check_* present)
               RustClient (PyO3 pyclass) passed to Python task
               py.allow_threads(|| reqwest HTTP) — GIL released for I/O
-              GIL re-acquired only for Python assertion check
-              Each HTTP call recorded as separate metric
+              GIL re-acquired only for Python callback
         │
-        ├── stdout (JSON lines, 1/sec) → CLI renders live terminal dashboard
-        └── :9090/metrics              → Prometheus / Grafana
+        ├── stdout JSON lines (1/sec) → CLI live dashboard
+        └── :9090/metrics → Prometheus / Grafana
 ```
-
-### PyO3 bridge
-
-The bridge is the key architectural decision. In PyO3 mode a `RustClient` is
-passed directly to the Python task. The task calls `.get()` / `.post()` etc. —
-each call releases the GIL via `py.allow_threads`, executes the HTTP request
-via `reqwest`, and re-acquires the GIL only to run the `check_{task}` assertion.
-
-This means:
-- **Multiple HTTP calls per task** work natively — no annotations needed
-- **GIL is held only for Python code** — the hot I/O path runs without it
-- **Each call is recorded independently** — full per-call latency in metrics
-
----
-
-## Comparison with Locust / k6 / Gatling
-
-| | Gatling | k6 | Locust | **LoadPilot** |
-|---|---|---|---|---|
-| **Language** | Scala | JavaScript | Python | **Python** |
-| **HTTP engine** | Netty (async Java) | Go runtime | Python (gevent) | **Rust / reqwest** |
-| **GIL problem** | — | — | Yes | **Partial*** |
-| **Multiple calls per task** | ✅ | ✅ | ✅ | ✅ |
-| **Assertions on response body** | ✅ | ✅ | ✅ | ✅ |
-| **Thresholds / CI fail** | ✅ | ✅ | ❌ | ✅ |
-| **Load profiles** | ✅ | ✅ | ❌ | ✅ |
-| **HTML report** | ✅ | ✅ | ✅ | ✅ |
-| **Prometheus metrics** | ✅ | ✅ | ✅ | ✅ |
-| **`pip install` (no build step)** | ✅ | ✅ | ✅ | ✅ |
-| **Distributed (free)** | ❌ paid | ❌ paid | ✅ | ✅ |
-| **Web UI** | ✅ | ✅ | ✅ | ❌ (Grafana) |
-
-*GIL is held only during Python callbacks. The HTTP I/O path runs without GIL.
-
-**Where LoadPilot wins today:**
-- Against Locust — HTTP throughput. Locust hits GIL wall at ~5k RPS.
-  LoadPilot's reqwest async keeps going.
-- Against Locust — load profiles (ramp / constant / step / spike). Locust has no built-in profiles.
-- Against k6 / Gatling — same Python ergonomics your team already knows.
-  No JavaScript, no Scala, no JVM.
-- Against all — thresholds with exit code 1, free distributed mode.
-
-**Where LoadPilot is not yet competitive:**
-- Web UI (by design — use Grafana)
-- No published benchmark yet — performance advantage is architectural, not yet measured
-
----
-
-## Path to Beating Gatling / k6 on RPS
-
-**Resolved bottlenecks:**
-
-**1. Body reading in static mode** — ✅ fixed in v0.5.
-`execute_request` previously called `resp.text().await` on every request even
-when no `check_*` method was present. Body read is now skipped in static mode —
-the response is dropped after status + headers are captured.
-
-**Remaining bottlenecks:**
-
-**2. GIL acquisition per request** — in PyO3 mode, one GIL acquisition happens
-per HTTP request (for `check_{task}`). At 10k RPS that is 10k GIL acquisitions
-per second — a hard ceiling.
-
-Fix: batch `check_{task}` calls — acquire the GIL once, check N responses,
-release. One GIL acquisition per 50 requests instead of per 1.
-
-**3. Python 3.13 free-threaded mode** — Python 3.13 ships an experimental
-no-GIL build (`python3.13t`). PyO3 0.23 supports it. With free threading,
-each tokio worker thread runs Python independently — the GIL bottleneck
-disappears entirely.
-
-**4. No published benchmark** — performance advantage over Locust/k6 is
-architectural but not yet measured. Planned for v0.6.
-
-**Estimated RPS ceiling:**
-
-| Mode | Estimate | Notes |
-|---|---|---|
-| Static (no PyO3) | ~50k+ RPS* | Pure Rust reqwest, body skip in place |
-| PyO3 (check_* active) | ~5–10k RPS* | GIL acquisition per request |
-| PyO3 + batch GIL | ~20–30k RPS* | Planned |
-| PyO3 + nogil Python | ~50k+ RPS* | Python 3.13t, experimental |
-
-*architecture estimate, not yet benchmarked
 
 ---
 
@@ -608,30 +435,29 @@ architectural but not yet measured. Planned for v0.6.
 | Version | Feature | Status |
 |---------|---------|--------|
 | v0.1 | Python DSL + Rust coordinator, terminal dashboard, Prometheus | ✅ done |
-| v0.2 | PyO3 bridge — on_start / on_stop / assertions on response body | ✅ done |
+| v0.2 | PyO3 bridge — on_start / on_stop / check_* | ✅ done |
 | v0.2 | HTML report | ✅ done |
 | v0.3 | Multiple HTTP calls per task | ✅ done |
 | v0.3 | Thresholds — fail with exit code 1 on SLA breach | ✅ done |
-| v0.3 | `pip install loadpilot` — prebuilt coordinator binaries | ✅ done |
-| v0.4 | Distributed mode — embedded NATS + local agents (`--agents N`) | ✅ done |
-| v0.4 | External agents — Railway / remote machines (`--nats-url`) | ✅ done |
+| v0.3 | `pip install` — prebuilt coordinator binaries | ✅ done |
+| v0.4 | Distributed mode — embedded NATS + local agents | ✅ done |
+| v0.4 | External agents — Railway / remote machines | ✅ done |
 | v0.4 | Agent install script (`curl \| sh`) | ✅ done |
 | v0.5 | Multiple `@scenario` per file | ✅ done |
-| v0.5 | Pre-auth pool — `on_start` supported in distributed mode | ✅ done |
-| v0.5 | Histogram merging for accurate percentiles in distributed mode | ✅ done |
-| v0.5 | Spike / step / constant load profiles (work in distributed too) | ✅ done |
-| v0.5 | Skip body read in static mode (perf) | ✅ done |
+| v0.5 | Load profiles — ramp / constant / step / spike | ✅ done |
+| v0.5 | `on_start` in distributed mode (pre-auth pool) | ✅ done |
+| v0.5 | Histogram merging — exact percentiles in distributed | ✅ done |
+| v0.5 | Clock skew fix — synchronised agent start | ✅ done |
+| v0.5 | NATS SPOF — agent timeout + recovery | ✅ done |
+| v0.5 | Interactive TUI — `loadpilot run` with no args | ✅ done |
+| v0.5 | `loadpilot init` — project scaffold | ✅ done |
 | v0.6 | Benchmark — LoadPilot vs Locust vs k6, published results | planned |
 | v0.6 | GitHub Releases + verify install.sh end-to-end | planned |
-| v1.0 | Production-hardened distributed mode, public benchmark | planned |
-
-**Removed from roadmap:** built-in Web UI — Grafana covers this better.
+| v1.0 | Public benchmark, production hardening | planned |
 
 ---
 
 ## Building from Source
-
-If you want to contribute or build the coordinator yourself:
 
 ```bash
 # Prerequisites: Python 3.12+, Rust 1.85+, uv
@@ -651,42 +477,15 @@ cd cli && uv pip install -e .
 ## Testing
 
 ```bash
-# Python unit + integration tests
+# Python tests
 cd cli
-uv pip install pytest
-pytest tests/ -v
+uv sync --extra dev
+uv run python -m pytest tests/ -v
 
-# Integration tests require the coordinator binary
-# (skipped automatically if not built)
-
-# Rust unit tests
+# Rust tests
 cd engine
 cargo test
 ```
-
-Test coverage:
-- `test_models.py` — `parse_duration`, `ScenarioPlan`, `TaskPlan`
-- `test_dsl.py` — `@scenario` / `@task` decorators, VUser lifecycle
-- `test_bridge.py` — `MockClient`, `MockResponse`, `CheckResponse`
-- `test_report.py` — HTML report generation
-- `test_integration.py` — CLI → coordinator subprocess protocol (static + PyO3 mode)
-- `metrics.rs` — `LatencyHistogram`, `Metrics` counters
-- `plan.rs` — serde deserialization
-- `coordinator.rs` — `pick_task`, `compute_target_rps`
-
----
-
-## Open Source Strategy
-
-LoadPilot occupies a specific gap: **Python load testing that does not hit
-the Locust performance ceiling, with distributed mode that is not paywalled**.
-
-k6 cloud and Gatling Enterprise charge $300–2000/month for distributed load
-testing. LoadPilot's distributed mode will always be free.
-
-For traction on GitHub the priority order is:
-1. Publish the Locust benchmark — the only concrete proof of the value proposition
-2. Spike / step load profiles — covers more CI use cases
 
 ---
 

@@ -655,10 +655,21 @@ class ExampleFlow(VUser):
             encoding="utf-8",
         )
 
+    # Copy monitoring stack (Prometheus + Grafana with auto-provisioned dashboard).
+    monitoring_dir = directory / "monitoring"
+    monitoring_dir.mkdir(exist_ok=True)
+    templates_dir = Path(__file__).parent / "templates" / "monitoring"
+    for src in templates_dir.iterdir():
+        dst = monitoring_dir / src.name
+        if not dst.exists():
+            import shutil
+            shutil.copy2(src, dst)
+
     console.print(f"[bold green]Initialised LoadPilot project[/] in [cyan]{directory}[/]")
     console.print()
-    console.print("  [dim]scenarios/example.py[/]  — edit this to write your first scenario")
-    console.print("  [dim].env.example[/]           — copy to .env and set TARGET_URL")
+    console.print("  [dim]scenarios/example.py[/]          — edit this to write your first scenario")
+    console.print("  [dim].env.example[/]                   — copy to .env and set TARGET_URL")
+    console.print("  [dim]monitoring/docker-compose.yml[/]  — Prometheus + Grafana (auto-configured)")
     console.print()
     console.print("Run your first test:")
     try:
@@ -666,6 +677,14 @@ class ExampleFlow(VUser):
     except ValueError:
         scenario_path = scenarios_dir / "example.py"
     console.print(f"  [bold]loadpilot run {scenario_path} --target http://localhost:8000[/]")
+    console.print()
+    console.print("Start live monitoring (optional):")
+    try:
+        monitoring_rel = monitoring_dir.relative_to(Path.cwd())
+    except ValueError:
+        monitoring_rel = monitoring_dir
+    console.print(f"  [bold]docker compose -f {monitoring_rel}/docker-compose.yml up -d[/]")
+    console.print("  Then open [cyan]http://localhost:3000[/] → Dashboards → LoadPilot")
 
 
 @app.command("version")

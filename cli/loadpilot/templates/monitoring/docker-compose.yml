@@ -1,0 +1,70 @@
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    user: root
+    ports:
+      - "9091:9090"
+    configs:
+      - source: prometheus_config
+        target: /etc/prometheus/prometheus.yml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    configs:
+      - source: grafana_datasource
+        target: /etc/grafana/provisioning/datasources/prometheus.yml
+      - source: grafana_dashboard_provider
+        target: /etc/grafana/provisioning/dashboards/loadpilot.yml
+    volumes:
+      - ./grafana-dashboard.json:/var/lib/grafana/dashboards/loadpilot.json
+    depends_on:
+      - prometheus
+    networks:
+      - monitoring
+
+networks:
+  monitoring:
+    driver: bridge
+
+configs:
+  prometheus_config:
+    content: |
+      global:
+        scrape_interval: 2s
+
+      scrape_configs:
+        - job_name: loadpilot
+          static_configs:
+            - targets:
+                - host.docker.internal:9090
+
+  grafana_datasource:
+    content: |
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          type: prometheus
+          uid: prometheus
+          url: http://prometheus:9090
+          isDefault: true
+          editable: true
+
+  grafana_dashboard_provider:
+    content: |
+      apiVersion: 1
+      providers:
+        - name: loadpilot
+          folder: LoadPilot
+          type: file
+          options:
+            path: /var/lib/grafana/dashboards

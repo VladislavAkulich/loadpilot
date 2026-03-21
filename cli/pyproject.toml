@@ -30,7 +30,12 @@ build-backend = "hatchling.build"
 # Include the coordinator binary (placed there by the build hook).
 # The glob covers both Linux/macOS (coordinator) and Windows (coordinator.exe).
 packages = ["loadpilot"]
-artifacts = ["loadpilot/coordinator", "loadpilot/coordinator.exe"]
+artifacts = [
+    "loadpilot/coordinator",
+    "loadpilot/coordinator.exe",
+    "loadpilot/templates/monitoring/docker-compose.yml",
+    "loadpilot/templates/monitoring/grafana-dashboard.json",
+]
 
 [tool.ruff]
 line-length = 100
