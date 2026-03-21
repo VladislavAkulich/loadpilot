@@ -58,11 +58,11 @@ Max throughput:
 PyO3 callbacks — cost of Python (500 RPS target):
   Mode                         RPS actual   p50     p99    errors
   LoadPilot static                 500      3ms    11ms      0%
-  + on_start (login per VUser)     351      1ms     3ms      0%
-  + on_start + check_*             351      1ms     3ms      0%
+  + on_start (login per VUser)     489      7ms    20ms      0%
+  + on_start + check_*             489      8ms    32ms      0%
 ```
 
-PyO3 mode achieves ~70% of the target RPS (351/500) due to GIL serialisation — Python callbacks run one at a time. Individual request latency is actually lower (1ms vs 3ms static) because fewer requests are in flight. Adding `check_*` on top of `on_start` has no additional throughput cost in this benchmark.
+PyO3 mode reaches ~98% of the target RPS. Each VUser runs in its own thread with its own mutex — the GIL is released during HTTP I/O so VUsers send requests in parallel. Latency is slightly higher (7–8ms vs 3ms) because more requests are in flight concurrently. Adding `check_*` on top of `on_start` has negligible throughput cost.
 
 ## Methodology notes
 

@@ -584,11 +584,16 @@ def run_command(
             if last_metrics.requests_total > 0
             else 0.0
         )
+        rps_actual = (
+            last_metrics.requests_total / last_metrics.elapsed_secs
+            if last_metrics.elapsed_secs > 0
+            else 0.0
+        )
         summary = {
             "scenario": scenario_name,
             "target_url": target,
             "rps_target": plan.rps,
-            "rps_actual": round(last_metrics.current_rps, 2),
+            "rps_actual": round(rps_actual, 2),
             "requests_total": last_metrics.requests_total,
             "errors_total": last_metrics.errors_total,
             "error_rate_pct": round(error_rate, 3),

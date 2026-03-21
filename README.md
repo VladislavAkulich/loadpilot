@@ -461,10 +461,10 @@ LoadPilot delivers **2.1× k6** and **4.8× Locust** at max throughput with zero
 | Mode | RPS actual | p50 | p99 | Errors |
 |------|-----------|-----|-----|--------|
 | LoadPilot static (no callbacks) | 500 | 3ms | 11ms | 0% |
-| + `on_start` (login per VUser) | 351 | 1ms | 3ms | 0% |
-| + `on_start` + `check_*` | 351 | 1ms | 3ms | 0% |
+| + `on_start` (login per VUser) | 489 | 7ms | 20ms | 0% |
+| + `on_start` + `check_*` | 489 | 8ms | 32ms | 0% |
 
-PyO3 mode achieves ~70% of the target RPS due to GIL serialisation — Python callbacks run one at a time. Individual request latency is lower (1ms vs 3ms) because fewer requests are in flight. Adding `check_*` on top of `on_start` has no additional cost.
+PyO3 mode reaches ~98% of the target RPS. Each VUser runs in its own thread with its own lock — the GIL is released during HTTP I/O so different VUsers send requests in parallel. Adding `check_*` on top of `on_start` has negligible throughput cost.
 
 Reproduce: `cd bench && ./run.sh` — see [docs/benchmark.md](docs/benchmark.md) for full methodology.
 

@@ -12,7 +12,7 @@
 /// Without Python bridge fields the coordinator falls back to the static URL /
 /// method from the plan (original behaviour, maximum Rust throughput).
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -95,13 +95,13 @@ impl Coordinator {
         // ── PyO3 bridge (optional) ────────────────────────────────────────────
         // Wrap in Arc<Mutex<>> so it can be cloned into tokio::spawn closures
         // and accessed from spawn_blocking threads.
-        let bridge: Option<Arc<Mutex<PythonBridge>>> =
+        let bridge: Option<Arc<PythonBridge>> =
             if let (Some(sf), Some(sc)) = (&plan.scenario_file, &plan.scenario_class) {
                 let n = plan.n_vusers.unwrap_or(5) as usize;
                 match PythonBridge::new(sf, sc, n, &plan.target_url, http_client.clone(), tokio::runtime::Handle::current()) {
                     Ok(b) => {
                         eprintln!("[loadpilot] PyO3 bridge ready ({} VUsers)", n);
-                        Some(Arc::new(Mutex::new(b)))
+                        Some(Arc::new(b))
                     }
                     Err(e) => {
                         eprintln!("[loadpilot] PyO3 bridge init failed: {} — using static URLs", e);
@@ -121,7 +121,7 @@ impl Coordinator {
         if let Some(ref b) = bridge {
             let b = Arc::clone(b);
             let ready = Arc::clone(&ready_vusers);
-            let n = b.lock().unwrap().n_vusers();
+            let n = b.n_vusers();
             // Space on_start calls evenly across the ramp-up window.
             let stagger_ms = if n > 1 && plan.ramp_up_secs > 0 {
                 plan.ramp_up_secs * 1000 / (n as u64 - 1)
@@ -133,7 +133,7 @@ impl Coordinator {
                 for i in 0..n {
                     let b_clone = Arc::clone(&b);
                     let result = tokio::task::spawn_blocking(move || {
-                        b_clone.lock().unwrap().call_on_start(i)
+                        b_clone.call_on_start(i)
                     })
                     .await;
 
@@ -267,7 +267,7 @@ impl Coordinator {
                         let b_run = Arc::clone(&b);
                         let task_name_r = task_name.clone();
                         let run_result = tokio::task::spawn_blocking(move || {
-                            b_run.lock().unwrap().run_task(vuser_idx, &task_name_r)
+                            b_run.run_task(vuser_idx, &task_name_r)
                         })
                         .await;
 
@@ -335,11 +335,11 @@ impl Coordinator {
 
         // Call on_stop for all VUsers.
         if let Some(ref b) = bridge {
-            let n = b.lock().unwrap().n_vusers();
+            let n = b.n_vusers();
             for i in 0..n {
                 let b_clone = Arc::clone(b);
                 let _ = tokio::task::spawn_blocking(move || {
-                    b_clone.lock().unwrap().call_on_stop(i)
+                    b_clone.call_on_stop(i)
                 })
                 .await;
             }

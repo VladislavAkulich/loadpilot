@@ -9,6 +9,7 @@
 ///      Each call is recorded; results are returned as Vec<CallResult>.
 ///   4. `call_on_stop(i)` runs `vuser.on_stop(LoadClient)` for VUser i.
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
@@ -270,7 +271,13 @@ struct VUser {
 }
 
 pub struct PythonBridge {
-    vusers: Vec<VUser>,
+    /// One mutex per VUser — tasks for different VUsers run in parallel;
+    /// tasks for the same VUser are serialised (correct per-VUser semantics).
+    ///
+    /// Lock order: always acquire VUser mutex BEFORE entering Python::with_gil.
+    /// This prevents the GIL → VUser-mutex deadlock that would occur if the
+    /// GIL were held while waiting for the per-VUser lock.
+    vusers: Vec<Mutex<VUser>>,
     base_url: String,
     has_on_start: bool,
     has_on_stop: bool,
@@ -319,7 +326,7 @@ impl PythonBridge {
             let mut vusers = Vec::with_capacity(n_vusers);
             for _ in 0..n_vusers {
                 let instance: Py<PyAny> = cls.call0()?.into_py(py);
-                vusers.push(VUser { instance });
+                vusers.push(Mutex::new(VUser { instance }));
             }
 
             Ok(PythonBridge {
@@ -342,11 +349,13 @@ impl PythonBridge {
         if !self.has_on_start {
             return Ok(());
         }
+        // Acquire VUser lock BEFORE entering Python::with_gil (lock-order rule).
+        // Recover from a poisoned mutex — a previous panic in a task should not
+        // permanently block this VUser.
+        let vuser = self.vusers[idx].lock().unwrap_or_else(|e| e.into_inner());
         Python::with_gil(|py| {
             let client = self.make_real_client(py)?;
-            self.vusers[idx]
-                .instance
-                .call_method1(py, "on_start", (client,))?;
+            vuser.instance.call_method1(py, "on_start", (client,))?;
             Ok(())
         })
         .map_err(|e: PyErr| anyhow!("on_start error (VUser {}): {}", idx, e))
@@ -356,11 +365,11 @@ impl PythonBridge {
         if !self.has_on_stop {
             return Ok(());
         }
+        // Acquire VUser lock BEFORE entering Python::with_gil (lock-order rule).
+        let vuser = self.vusers[idx].lock().unwrap_or_else(|e| e.into_inner());
         Python::with_gil(|py| {
             let client = self.make_real_client(py)?;
-            self.vusers[idx]
-                .instance
-                .call_method1(py, "on_stop", (client,))?;
+            vuser.instance.call_method1(py, "on_stop", (client,))?;
             Ok(())
         })
         .map_err(|e: PyErr| anyhow!("on_stop error (VUser {}): {}", idx, e))
@@ -370,6 +379,21 @@ impl PythonBridge {
     /// HTTP request so other Python callbacks and tokio tasks proceed in parallel.
     /// Returns one `CallResult` per HTTP call made by the task.
     pub fn run_task(&self, vuser_idx: usize, task_name: &str) -> Result<Vec<CallResult>> {
+        // Acquire VUser lock BEFORE entering Python::with_gil.
+        //
+        // Lock order: VUser mutex → GIL.
+        //
+        // If we held the GIL first and then tried to acquire the VUser mutex,
+        // another thread could hold the VUser mutex and be waiting for the GIL
+        // after py.allow_threads() — a classic ABBA deadlock.
+        //
+        // With this order: a thread waiting for the VUser mutex has NOT yet
+        // called with_gil, so it cannot block the GIL.  The thread that holds
+        // the VUser mutex may be inside py.allow_threads() (GIL released), at
+        // which point it is waiting for the reqwest future — not for any lock —
+        // so no cycle exists.
+        let vuser = self.vusers[vuser_idx].lock().unwrap_or_else(|e| e.into_inner());
+
         Python::with_gil(|py| {
             let rust_client = Py::new(
                 py,
@@ -380,7 +404,7 @@ impl PythonBridge {
                 ),
             )?;
 
-            let vuser = self.vusers[vuser_idx].instance.bind(py);
+            let vuser = vuser.instance.bind(py);
 
             // Run the task — GIL is released inside each client.get/post/...
             if let Err(e) = vuser.call_method1(task_name, (rust_client.bind(py),)) {
