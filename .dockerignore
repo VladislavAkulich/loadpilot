@@ -1,0 +1,15 @@
+# Rust build artifacts — largest offender (~400MB)
+# Keep engine/target/release/{coordinator,agent} excluded too — built inside Docker
+engine/target/
+
+# Python caches
+cli/__pycache__
+cli/.venv
+cli/.pytest_cache
+cli/*.egg-info
+**/__pycache__
+
+# Not needed in any Docker image
+docs/
+.git/
+.github/

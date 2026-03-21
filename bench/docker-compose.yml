@@ -1,0 +1,116 @@
+services:
+  target:
+    build: ./target
+    ports:
+      - "8000:8000"
+    networks:
+      - bench
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health || exit 1"]
+      interval: 2s
+      retries: 15
+      start_period: 10s
+
+  # ── Precision (500 RPS target) ─────────────────────────────────────────────
+
+  loadpilot-precision:
+    build:
+      context: ../
+      dockerfile: bench/Dockerfile.loadpilot
+    volumes:
+      - ./scenarios:/scenarios
+      - ./results:/results
+    networks:
+      - bench
+    depends_on:
+      target:
+        condition: service_healthy
+    profiles: ["loadpilot-precision"]
+    command: >
+      loadpilot run /scenarios/precision/loadpilot.py
+        --target http://target:8000
+        --results-json /results/precision_loadpilot.json
+
+  locust-precision:
+    image: locustio/locust:latest
+    volumes:
+      - ./scenarios:/scenarios
+      - ./results:/results
+    networks:
+      - bench
+    depends_on:
+      target:
+        condition: service_healthy
+    profiles: ["locust-precision"]
+    command: >
+      -f /scenarios/precision/locust.py
+        --headless --users 500 --spawn-rate 500 --run-time 30s
+        --host http://target:8000
+        --csv /results/precision_locust
+
+  k6-precision:
+    image: grafana/k6:latest
+    volumes:
+      - ./scenarios:/scenarios
+      - ./results:/results
+    networks:
+      - bench
+    depends_on:
+      target:
+        condition: service_healthy
+    profiles: ["k6-precision"]
+    command: run --summary-export /results/precision_k6.json /scenarios/precision/k6.js
+
+  # ── Max throughput ─────────────────────────────────────────────────────────
+
+  loadpilot-max:
+    build:
+      context: ../
+      dockerfile: bench/Dockerfile.loadpilot
+    volumes:
+      - ./scenarios:/scenarios
+      - ./results:/results
+    networks:
+      - bench
+    depends_on:
+      target:
+        condition: service_healthy
+    profiles: ["loadpilot-max"]
+    command: >
+      loadpilot run /scenarios/max/loadpilot.py
+        --target http://target:8000
+        --results-json /results/max_loadpilot.json
+
+  locust-max:
+    image: locustio/locust:latest
+    volumes:
+      - ./scenarios:/scenarios
+      - ./results:/results
+    networks:
+      - bench
+    depends_on:
+      target:
+        condition: service_healthy
+    profiles: ["locust-max"]
+    command: >
+      -f /scenarios/max/locust.py
+        --headless --users 200 --spawn-rate 200 --run-time 30s
+        --host http://target:8000
+        --csv /results/max_locust
+
+  k6-max:
+    image: grafana/k6:latest
+    volumes:
+      - ./scenarios:/scenarios
+      - ./results:/results
+    networks:
+      - bench
+    depends_on:
+      target:
+        condition: service_healthy
+    profiles: ["k6-max"]
+    command: run --summary-export /results/max_k6.json /scenarios/max/k6.js
+
+networks:
+  bench:
+    driver: bridge

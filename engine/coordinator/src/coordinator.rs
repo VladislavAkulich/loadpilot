@@ -81,12 +81,15 @@ impl Coordinator {
         let done_flag = Arc::new(AtomicBool::new(false));
         let active_workers = Arc::new(AtomicU64::new(0));
 
-        let max_concurrency = (plan.rps * 4).max(100) as usize;
+        // Little's Law: concurrency = RPS × expected_latency.
+        // We budget 200ms of in-flight tolerance, capped at 2000 to prevent
+        // connection storms at high RPS targets.
+        let max_concurrency = ((plan.rps as f64 * 0.2) as usize).max(50).min(2000);
         let sem = Arc::new(Semaphore::new(max_concurrency));
 
         let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .pool_max_idle_per_host(256)
+            .timeout(Duration::from_secs(10))
+            .pool_max_idle_per_host(max_concurrency.min(512))
             .build()?;
 
         // ── PyO3 bridge (optional) ────────────────────────────────────────────

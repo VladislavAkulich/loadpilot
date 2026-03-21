@@ -1,0 +1,23 @@
+# Exclude Rust build artifacts — the coordinator binary is the only thing needed
+# from engine/, and it must be pre-built before running the benchmark.
+engine/target/deps
+engine/target/build
+engine/target/incremental
+engine/target/.fingerprint
+engine/target/debug
+engine/target/release/build
+engine/target/release/deps
+engine/target/release/incremental
+engine/target/release/.fingerprint
+
+# Python caches
+cli/__pycache__
+cli/.venv
+cli/*.egg-info
+cli/.pytest_cache
+
+# Docs and bench itself are not needed in the image
+docs/
+bench/
+.git/
+.github/

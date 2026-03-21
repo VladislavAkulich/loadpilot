@@ -96,8 +96,10 @@ def scenario(
     return decorator
 
 
-def task(weight: int = 1):
+def task(_func=None, *, weight: int = 1):
     """Method decorator that marks a method as a load test task.
+
+    Can be used as @task or @task() or @task(weight=3).
 
     Args:
         weight: Relative weight for task selection. Higher weight = more frequent execution.
@@ -111,4 +113,7 @@ def task(weight: int = 1):
         wrapper._task_weight = weight  # type: ignore[attr-defined]
         return wrapper
 
+    if _func is not None:
+        # Used as @task without parentheses
+        return decorator(_func)
     return decorator

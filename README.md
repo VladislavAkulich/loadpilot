@@ -234,6 +234,7 @@ Omit `SCENARIO_FILE` to open the interactive scenario browser (TTY only).
 | `--external-agents` | `0`                     | Wait for N externally started agents |
 | `--nats-url`        | —                       | Connect to external NATS (use with `--external-agents`) |
 | `--threshold`       | from `@scenario`        | Override SLA threshold: `--threshold p99_ms=500` |
+| `--results-json`    | off                     | Write final metrics as JSON to this path |
 
 ### `loadpilot init`
 
@@ -427,6 +428,35 @@ Coordinator (Rust / tokio)
         ├── stdout JSON lines (1/sec) → CLI live dashboard
         └── :9090/metrics → Prometheus / Grafana
 ```
+
+---
+
+## Benchmark
+
+All tools run in Docker against a Rust/axum echo server on the same machine.
+Tools run sequentially with a 10s cooldown. LoadPilot uses static mode (no Python callbacks).
+
+### Precision — 500 RPS target, 30s constant
+
+| Tool | RPS actual | p50 | p95 | p99 | Errors |
+|------|-----------|-----|-----|-----|--------|
+| LoadPilot | 500 | 3ms | 6ms | 11ms | 0% |
+| k6 | 500 | 1ms | 3ms | 8ms | 0% |
+| Locust | 497 | 170ms | 360ms | 1500ms | 0% |
+
+LoadPilot and k6 are both accurate. Locust hits the target RPS but adds significant latency overhead from its Python/GIL scheduler — visible even at moderate load.
+
+### Max throughput — 30s constant, no artificial cap
+
+| Tool | RPS | p50 | p95 | p99 | Errors |
+|------|-----|-----|-----|-----|--------|
+| LoadPilot | **3326** | 19ms | 192ms | 512ms | 0% |
+| k6 | 1617 | 17ms | 113ms | 164ms | 0% |
+| Locust | 694 | 99ms | 130ms | 160ms | 0% |
+
+LoadPilot delivers **2.1× k6** and **4.8× Locust** at max throughput with zero errors.
+
+Reproduce: `cd bench && ./run.sh` — see [docs/benchmark.md](docs/benchmark.md) for full methodology.
 
 ---
 

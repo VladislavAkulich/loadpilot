@@ -418,6 +418,10 @@ def run_command(
             "Example: --threshold p99_ms=500 --threshold error_rate=1"
         ),
     ),
+    results_json: Optional[Path] = typer.Option(
+        None, "--results-json",
+        help="Write final metrics as JSON to this path (e.g. --results-json results.json).",
+    ),
 ):
     """Run a load test scenario against TARGET. Omit the file to browse interactively."""
     # ── No file given: TUI browser or error ───────────────────────────────────
@@ -573,6 +577,30 @@ def run_command(
             n_agents=external_agents if external_agents > 0 else agents,
         )
         console.print(f"  Report         : [cyan]{report}[/]")
+
+    if results_json is not None and last_metrics:
+        error_rate = (
+            last_metrics.errors_total / last_metrics.requests_total * 100
+            if last_metrics.requests_total > 0
+            else 0.0
+        )
+        summary = {
+            "scenario": scenario_name,
+            "target_url": target,
+            "rps_target": plan.rps,
+            "rps_actual": round(last_metrics.current_rps, 2),
+            "requests_total": last_metrics.requests_total,
+            "errors_total": last_metrics.errors_total,
+            "error_rate_pct": round(error_rate, 3),
+            "p50_ms": last_metrics.latency.p50_ms,
+            "p95_ms": last_metrics.latency.p95_ms,
+            "p99_ms": last_metrics.latency.p99_ms,
+            "max_ms": last_metrics.latency.max_ms,
+            "duration_secs": last_metrics.elapsed_secs,
+        }
+        results_json.parent.mkdir(parents=True, exist_ok=True)
+        results_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        console.print(f"  Results JSON   : [cyan]{results_json}[/]")
 
     threshold_failed = False
     if last_metrics and plan.thresholds:
