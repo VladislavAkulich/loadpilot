@@ -444,8 +444,9 @@ async fn execute_request(
         .iter()
         .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
         .collect();
-    let body_text = resp.text().await.unwrap_or_default();
-    Ok(HttpResponse { status, headers: resp_headers, body: body_text })
+    // Body intentionally not read in static mode — no check_* method runs here,
+    // so allocating the response body on every request is unnecessary overhead.
+    Ok(HttpResponse { status, headers: resp_headers, body: String::new() })
 }
 
 #[cfg(test)]
