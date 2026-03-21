@@ -111,6 +111,48 @@ services:
     profiles: ["k6-max"]
     command: run --summary-export /results/max_k6.json /scenarios/max/k6.js
 
+  # ── PyO3 mode (on_start only) ──────────────────────────────────────────────
+
+  loadpilot-pyo3-onstart:
+    build:
+      context: ../
+      dockerfile: bench/Dockerfile.loadpilot
+    volumes:
+      - ./scenarios:/scenarios
+      - ./results:/results
+    networks:
+      - bench
+    depends_on:
+      target:
+        condition: service_healthy
+    profiles: ["loadpilot-pyo3-onstart"]
+    command: >
+      loadpilot run /scenarios/pyo3/loadpilot.py
+        --scenario PyO3OnStart
+        --target http://target:8000
+        --results-json /results/pyo3_onstart_loadpilot.json
+
+  # ── PyO3 mode (on_start + check_*) ─────────────────────────────────────────
+
+  loadpilot-pyo3-full:
+    build:
+      context: ../
+      dockerfile: bench/Dockerfile.loadpilot
+    volumes:
+      - ./scenarios:/scenarios
+      - ./results:/results
+    networks:
+      - bench
+    depends_on:
+      target:
+        condition: service_healthy
+    profiles: ["loadpilot-pyo3-full"]
+    command: >
+      loadpilot run /scenarios/pyo3/loadpilot.py
+        --scenario PyO3Full
+        --target http://target:8000
+        --results-json /results/pyo3_full_loadpilot.json
+
 networks:
   bench:
     driver: bridge

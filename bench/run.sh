@@ -62,6 +62,16 @@ run locust-max    "Locust"    ; cooldown
 run k6-max        "k6"
 echo
 
+# ── PyO3 mode (LoadPilot only) ────────────────────────────────────────────────
+echo "[3/4] PyO3 scenario — on_start only (target: 500 RPS, 30s)"
+
+run loadpilot-pyo3-onstart "LoadPilot (on_start only)" ; cooldown
+
+echo "[3/4] PyO3 scenario — on_start + check_* (target: 500 RPS, 30s)"
+
+run loadpilot-pyo3-full "LoadPilot (on_start + check_*)"
+echo
+
 # ── Report ─────────────────────────────────────────────────────────────────────
 echo "[4/4] Generating report..."
 python3 report.py

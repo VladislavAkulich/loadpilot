@@ -134,9 +134,33 @@ def _print_table(label: str, rows: list[dict]) -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _loadpilot_pyo3(variant: str) -> dict | None:
+    p = RESULTS / f"pyo3_{variant}_loadpilot.json"
+    if not p.exists():
+        return None
+    d = json.loads(p.read_text())
+    label = {"onstart": "LoadPilot + on_start", "full": "LoadPilot + on_start + check_*"}
+    return {
+        "tool": label.get(variant, variant),
+        "rps_actual": d.get("rps_actual"),
+        "p50_ms": d.get("p50_ms"),
+        "p95_ms": d.get("p95_ms"),
+        "p99_ms": d.get("p99_ms"),
+        "max_ms": d.get("max_ms"),
+        "error_rate_pct": d.get("error_rate_pct"),
+        "requests_total": d.get("requests_total"),
+    }
+
+
 def generate() -> None:
     precision = [r for r in [_loadpilot("precision"), _k6("precision"), _locust("precision")] if r]
     max_tp    = [r for r in [_loadpilot("max"),       _k6("max"),       _locust("max")]       if r]
+
+    # PyO3 section: static baseline + on_start + on_start+check_*
+    static = _loadpilot("precision")
+    if static:
+        static = {**static, "tool": "LoadPilot static (no callbacks)"}
+    pyo3 = [r for r in [static, _loadpilot_pyo3("onstart"), _loadpilot_pyo3("full")] if r]
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -160,28 +184,34 @@ def generate() -> None:
 </head>
 <body>
 <h1>LoadPilot Benchmark</h1>
-<p class="meta">Target: Rust/axum echo server · Docker · {ts}</p>
+<p class="meta">Target: Rust/axum server · Docker · {ts}</p>
 
 <div class="section">
   <h2>Precision — 500 RPS target, 30s</h2>
-  <p class="note">All tools are configured to deliver exactly 500 RPS.
-  Measures how accurately each tool holds the target and what latency overhead it adds.</p>
+  <p class="note">All tools configured to deliver exactly 500 RPS.
+  Measures accuracy and load generator latency overhead.</p>
   {_html_table(precision)}
 </div>
 
 <div class="section">
-  <h2>Max throughput — no RPS cap, 30s</h2>
-  <p class="note">Each tool runs at maximum capacity.
-  LoadPilot: rps=10 000 (static mode, pure Rust).
-  Locust: 200 users, no wait_time.
-  k6: ramping arrival rate up to 10 000 RPS.</p>
+  <h2>Max throughput — 30s constant</h2>
+  <p class="note">Each tool runs at maximum capacity (LoadPilot static mode, pure Rust).</p>
   {_html_table(max_tp)}
 </div>
 
+<div class="section">
+  <h2>PyO3 mode — Python callbacks cost (LoadPilot only, 500 RPS target)</h2>
+  <p class="note">Shows the throughput impact of enabling Python callbacks.
+  Static mode: pure Rust, no Python.
+  on_start only: Python runs once per VUser before tasks; tasks run via Python task runner.
+  on_start + check_*: full Python round-trip — task + response assertion per request.</p>
+  {_html_table(pyo3)}
+</div>
+
 <p class="note">
-  <strong>Methodology:</strong> tools run sequentially with a 10s cooldown between runs.
-  LoadPilot uses static mode (no Python callbacks) — equivalent to k6/Locust scenarios with no custom logic.
+  <strong>Methodology:</strong> tools run sequentially with a 10s cooldown.
   All containers share the same Docker bridge network.
+  Reproduce: <code>cd bench &amp;&amp; ./run.sh</code>
 </p>
 </body>
 </html>"""
@@ -191,6 +221,8 @@ def generate() -> None:
 
     _print_table("Precision (500 RPS target):", precision)
     _print_table("Max throughput:", max_tp)
+    if pyo3:
+        _print_table("PyO3 mode — Python callbacks cost:", pyo3)
     print(f"\nReport → {out}")
 
 

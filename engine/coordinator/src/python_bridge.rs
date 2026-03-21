@@ -288,6 +288,12 @@ impl PythonBridge {
         rt_handle: tokio::runtime::Handle,
     ) -> Result<Self> {
         Python::with_gil(|py| {
+            // Pre-import the loadpilot package before adding the scenario directory
+            // to sys.path. This prevents a circular import when the scenario file
+            // itself is named loadpilot.py (which would shadow the package if the
+            // directory were prepended first).
+            let _ = py.import("loadpilot");
+
             let sys = py.import("sys")?;
             let path = sys.getattr("path")?;
             let dir = std::path::Path::new(scenario_file)

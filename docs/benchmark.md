@@ -4,10 +4,11 @@ How to reproduce the LoadPilot benchmark results.
 
 ## What is tested
 
-Two scenarios:
+Three scenarios:
 
 - **Precision** — all tools target 500 RPS for 30s. Measures how accurately each tool holds the target RPS and what latency overhead the load generator itself adds.
 - **Max throughput** — each tool runs at maximum capacity for 30s. Measures the throughput ceiling on a single machine.
+- **PyO3 callbacks** (LoadPilot only) — measures the throughput cost of enabling Python callbacks (`on_start`, `check_*`). Compares static mode (pure Rust) against on_start-only and on_start+check_* modes.
 
 ## Setup
 
@@ -53,7 +54,15 @@ Max throughput:
   LoadPilot       3326     19ms   192ms   512ms      0%
   k6              1617     17ms   113ms   164ms      0%
   Locust           694     99ms   130ms   160ms      0%
+
+PyO3 callbacks — cost of Python (500 RPS target):
+  Mode                         RPS actual   p50     p99    errors
+  LoadPilot static                 500      3ms    11ms      0%
+  + on_start (login per VUser)     351      1ms     3ms      0%
+  + on_start + check_*             351      1ms     3ms      0%
 ```
+
+PyO3 mode achieves ~70% of the target RPS (351/500) due to GIL serialisation — Python callbacks run one at a time. Individual request latency is actually lower (1ms vs 3ms static) because fewer requests are in flight. Adding `check_*` on top of `on_start` has no additional throughput cost in this benchmark.
 
 ## Methodology notes
 

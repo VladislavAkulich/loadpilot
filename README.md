@@ -456,6 +456,16 @@ LoadPilot and k6 are both accurate. Locust hits the target RPS but adds signific
 
 LoadPilot delivers **2.1× k6** and **4.8× Locust** at max throughput with zero errors.
 
+### PyO3 mode — Python callback cost (500 RPS target)
+
+| Mode | RPS actual | p50 | p99 | Errors |
+|------|-----------|-----|-----|--------|
+| LoadPilot static (no callbacks) | 500 | 3ms | 11ms | 0% |
+| + `on_start` (login per VUser) | 351 | 1ms | 3ms | 0% |
+| + `on_start` + `check_*` | 351 | 1ms | 3ms | 0% |
+
+PyO3 mode achieves ~70% of the target RPS due to GIL serialisation — Python callbacks run one at a time. Individual request latency is lower (1ms vs 3ms) because fewer requests are in flight. Adding `check_*` on top of `on_start` has no additional cost.
+
 Reproduce: `cd bench && ./run.sh` — see [docs/benchmark.md](docs/benchmark.md) for full methodology.
 
 ---
