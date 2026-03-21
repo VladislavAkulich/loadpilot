@@ -26,6 +26,7 @@ def generate(
 ) -> None:
     """Build and write the HTML report to *output_path*."""
     html = _build(snapshots, scenario_name, target_url, rps_target, duration_secs, ramp_up_secs, thresholds or {}, n_agents)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
 
 

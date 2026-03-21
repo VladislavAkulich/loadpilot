@@ -27,8 +27,8 @@ jobs:
 
       - name: Install Python deps
         working-directory: cli
-        run: uv sync
+        run: uv sync --extra dev
 
       - name: Run tests
         working-directory: cli
-        run: uv run pytest tests/ -v
+        run: uv run python -m pytest tests/ -v

@@ -541,6 +541,7 @@ This means:
 | **Multiple calls per task** | ✅ | ✅ | ✅ | ✅ |
 | **Assertions on response body** | ✅ | ✅ | ✅ | ✅ |
 | **Thresholds / CI fail** | ✅ | ✅ | ❌ | ✅ |
+| **Load profiles** | ✅ | ✅ | ❌ | ✅ |
 | **HTML report** | ✅ | ✅ | ✅ | ✅ |
 | **Prometheus metrics** | ✅ | ✅ | ✅ | ✅ |
 | **`pip install` (no build step)** | ✅ | ✅ | ✅ | ✅ |
@@ -552,23 +553,27 @@ This means:
 **Where LoadPilot wins today:**
 - Against Locust — HTTP throughput. Locust hits GIL wall at ~5k RPS.
   LoadPilot's reqwest async keeps going.
+- Against Locust — load profiles (ramp / constant / step / spike). Locust has no built-in profiles.
 - Against k6 / Gatling — same Python ergonomics your team already knows.
   No JavaScript, no Scala, no JVM.
 - Against all — thresholds with exit code 1, free distributed mode.
 
 **Where LoadPilot is not yet competitive:**
 - Web UI (by design — use Grafana)
+- No published benchmark yet — performance advantage is architectural, not yet measured
 
 ---
 
 ## Path to Beating Gatling / k6 on RPS
 
-Current bottlenecks in order of impact:
+**Resolved bottlenecks:**
 
-**1. Body reading in static mode** — ✅ fixed in v0.4.
+**1. Body reading in static mode** — ✅ fixed in v0.5.
 `execute_request` previously called `resp.text().await` on every request even
 when no `check_*` method was present. Body read is now skipped in static mode —
 the response is dropped after status + headers are captured.
+
+**Remaining bottlenecks:**
 
 **2. GIL acquisition per request** — in PyO3 mode, one GIL acquisition happens
 per HTTP request (for `check_{task}`). At 10k RPS that is 10k GIL acquisitions
@@ -582,12 +587,17 @@ no-GIL build (`python3.13t`). PyO3 0.23 supports it. With free threading,
 each tokio worker thread runs Python independently — the GIL bottleneck
 disappears entirely.
 
-**Estimated RPS ceiling after each fix:**
+**4. No published benchmark** — performance advantage over Locust/k6 is
+architectural but not yet measured. Planned for v0.6.
 
-| Mode | Now | After body fix | After batch GIL | After nogil |
-|---|---|---|---|---|
-| Static | ~20k* | ~50k+* | ~50k+* | ~50k+* |
-| PyO3 | ~5–10k* | — | ~20–30k* | ~50k+* |
+**Estimated RPS ceiling:**
+
+| Mode | Estimate | Notes |
+|---|---|---|
+| Static (no PyO3) | ~50k+ RPS* | Pure Rust reqwest, body skip in place |
+| PyO3 (check_* active) | ~5–10k RPS* | GIL acquisition per request |
+| PyO3 + batch GIL | ~20–30k RPS* | Planned |
+| PyO3 + nogil Python | ~50k+ RPS* | Python 3.13t, experimental |
 
 *architecture estimate, not yet benchmarked
 
@@ -606,12 +616,13 @@ disappears entirely.
 | v0.4 | Distributed mode — embedded NATS + local agents (`--agents N`) | ✅ done |
 | v0.4 | External agents — Railway / remote machines (`--nats-url`) | ✅ done |
 | v0.4 | Agent install script (`curl \| sh`) | ✅ done |
-| v0.5 | Benchmark — LoadPilot vs Locust vs k6, published results | planned |
 | v0.5 | Multiple `@scenario` per file | ✅ done |
 | v0.5 | Pre-auth pool — `on_start` supported in distributed mode | ✅ done |
 | v0.5 | Histogram merging for accurate percentiles in distributed mode | ✅ done |
-| v0.5 | Spike / step / constant load profiles | ✅ done |
-| v0.5 | GitHub Releases + verify install.sh end-to-end | planned |
+| v0.5 | Spike / step / constant load profiles (work in distributed too) | ✅ done |
+| v0.5 | Skip body read in static mode (perf) | ✅ done |
+| v0.6 | Benchmark — LoadPilot vs Locust vs k6, published results | planned |
+| v0.6 | GitHub Releases + verify install.sh end-to-end | planned |
 | v1.0 | Production-hardened distributed mode, public benchmark | planned |
 
 **Removed from roadmap:** built-in Web UI — Grafana covers this better.

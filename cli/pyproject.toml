@@ -9,6 +9,12 @@ dependencies = [
     "rich",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "anyio[trio]",
+]
+
 [project.scripts]
 loadpilot = "loadpilot.cli:app"
 
