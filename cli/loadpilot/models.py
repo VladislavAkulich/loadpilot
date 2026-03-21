@@ -20,6 +20,17 @@ class DataPoolEntry(BaseModel):
     values: dict[str, str | int | float | bool]
 
 
+class VUserConfig(BaseModel):
+    """Per-VUser state pre-extracted from on_start for distributed mode.
+
+    Coordinator runs on_start for each VUser and captures the HTTP headers
+    each task would use (via MockClient). Agents receive this pool and rotate
+    through it, keeping all HTTP execution in pure Rust.
+    """
+
+    task_headers: dict[str, dict[str, str]] = Field(default_factory=dict)
+
+
 class ScenarioPlan(BaseModel):
     """Serialized test plan sent from Python CLI to Rust coordinator."""
 
@@ -31,10 +42,13 @@ class ScenarioPlan(BaseModel):
     target_url: str
     tasks: list[TaskPlan] = Field(default_factory=list)
     data_pool: list[DataPoolEntry] = Field(default_factory=list)
-    # PyO3 bridge fields — present when the scenario has Python callbacks.
+    # PyO3 bridge fields — present only in single-process mode with Python callbacks.
     scenario_file: str | None = None
     scenario_class: str | None = None
     n_vusers: int | None = None
+    # Pre-auth pool for distributed mode (replaces PyO3 in distributed).
+    # Each entry holds the headers each task would use after on_start.
+    vuser_configs: list[VUserConfig] = Field(default_factory=list)
     # SLA thresholds: {metric: max_value}. Checked by CLI after the test.
     thresholds: dict[str, float] = Field(default_factory=dict)
 

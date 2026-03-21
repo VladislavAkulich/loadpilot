@@ -114,6 +114,15 @@ fn default_method() -> String {
     "GET".to_string()
 }
 
+/// Per-VUser pre-authenticated header set extracted by the coordinator's on_start
+/// pre-auth pool. Agents rotate through these in pure Rust HTTP.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct VUserConfig {
+    /// task_name → headers map produced after running on_start + task mock-probe.
+    #[serde(default)]
+    pub task_headers: HashMap<String, HashMap<String, String>>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ScenarioPlan {
     pub name: String,
@@ -132,4 +141,8 @@ pub struct ScenarioPlan {
     pub scenario_class: Option<String>,
     #[serde(default)]
     pub n_vusers: Option<u64>,
+    /// Pre-auth pool for distributed mode. Each entry holds per-task headers
+    /// produced by running on_start on the coordinator side.
+    #[serde(default)]
+    pub vuser_configs: Vec<VUserConfig>,
 }

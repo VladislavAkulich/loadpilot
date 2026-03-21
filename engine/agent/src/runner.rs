@@ -40,6 +40,14 @@ pub struct TaskPlan {
 fn default_weight() -> u32 { 1 }
 fn default_method() -> String { "GET".to_string() }
 
+/// Per-VUser pre-auth headers shipped with the plan for distributed mode.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VUserConfig {
+    /// task_name → headers map
+    #[serde(default)]
+    pub task_headers: HashMap<String, HashMap<String, String>>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Plan {
     pub name: String,
@@ -51,6 +59,9 @@ pub struct Plan {
     pub tasks: Vec<TaskPlan>,
     #[serde(default)]
     pub n_vusers: Option<u64>,
+    /// Pre-auth pool for distributed mode. Agents rotate through these.
+    #[serde(default)]
+    pub vuser_configs: Vec<VUserConfig>,
 }
 
 // ── Metrics snapshot sent back to coordinator ─────────────────────────────────
@@ -219,6 +230,9 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
     let duration = Duration::from_secs(plan.duration_secs);
     let ramp_up = Duration::from_secs(plan.ramp_up_secs);
     let target_rps = plan.rps;
+    // Pre-auth pool: Arc so workers can cheaply clone the reference.
+    let vuser_configs = Arc::new(plan.vuser_configs);
+    let pool_size = vuser_configs.len() as u64;
 
     let mut request_idx: u64 = 0;
     let tick_ms = 50u64;
@@ -249,6 +263,17 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
         for _ in 0..requests_this_tick {
             if tasks.is_empty() { break; }
             let task = pick_task(&tasks, request_idx).clone();
+            // Pick per-VUser headers by round-robin through the pre-auth pool.
+            let extra_headers: HashMap<String, String> = if pool_size > 0 {
+                let slot = (request_idx % pool_size) as usize;
+                vuser_configs[slot]
+                    .task_headers
+                    .get(&task.name)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                HashMap::new()
+            };
             request_idx += 1;
 
             let url = format!("{}{}", base_url, task.url);
@@ -266,7 +291,12 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
                     "DELETE" => http2.delete(&url),
                     _ => http2.get(&url),
                 };
+                // Task-level static headers first, then per-VUser pre-auth headers
+                // (pre-auth headers take precedence so on_start tokens override defaults).
                 for (k, v) in &task.headers {
+                    req = req.header(k, v);
+                }
+                for (k, v) in &extra_headers {
                     req = req.header(k, v);
                 }
                 if let Some(body) = &task.body_template {

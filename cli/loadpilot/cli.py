@@ -17,7 +17,7 @@ from rich.live import Live
 from rich.panel import Panel
 
 from loadpilot.dsl import _scenarios, _clear_scenarios
-from loadpilot.models import AgentMetrics, ScenarioPlan, TaskPlan, parse_duration
+from loadpilot.models import AgentMetrics, ScenarioPlan, TaskPlan, VUserConfig, parse_duration
 from loadpilot import report as _report
 
 app = typer.Typer(
@@ -76,7 +76,12 @@ def _load_scenario_file(scenario_file: Path) -> None:
     spec.loader.exec_module(module)  # type: ignore[union-attr]
 
 
-def _build_plan(scenario_file: Path, target: str, scenario_name: str | None = None) -> ScenarioPlan:
+def _build_plan(
+    scenario_file: Path,
+    target: str,
+    scenario_name: str | None = None,
+    distributed: bool = False,
+) -> ScenarioPlan:
     if not _scenarios:
         raise ValueError("No @scenario classes found in the scenario file.")
 
@@ -131,6 +136,52 @@ def _build_plan(scenario_file: Path, target: str, scenario_name: str | None = No
         or has_check
     )
 
+    # ── Distributed pre-auth pool ──────────────────────────────────────────────
+    # In distributed mode PyO3 callbacks can't run on remote agents.
+    # If the scenario has on_start (e.g. login → per-VUser auth token), we run
+    # on_start N times here on the coordinator side using a real HTTP client,
+    # then probe each @task with MockClient to capture what headers on_start set.
+    # The resulting vuser_configs list is shipped with the plan so agents can
+    # rotate through pre-authenticated header sets in pure Rust.
+    vuser_configs: list[VUserConfig] = []
+    if distributed and "on_start" in s.cls.__dict__:
+        from loadpilot.client import LoadClient as _LoadClient
+        pool_size = min(n_vusers, 20)
+        console.print(
+            f"[dim]Distributed pre-auth: running on_start for {pool_size} VUsers…[/]"
+        )
+        failed_first = False
+        for i in range(pool_size):
+            try:
+                instance = s.cls()
+                with _LoadClient(target) as real_client:
+                    instance.on_start(real_client)
+                task_headers: dict[str, dict[str, str]] = {}
+                for td in s.tasks:
+                    mock = _MockClient()
+                    try:
+                        td.func(instance, mock)
+                        _, _, h, _ = mock.get_call()
+                        task_headers[td.name] = h
+                    except Exception:
+                        task_headers[td.name] = {}
+                vuser_configs.append(VUserConfig(task_headers=task_headers))
+            except Exception as exc:
+                if i == 0:
+                    console.print(
+                        f"[yellow]on_start pre-auth failed: {exc}. "
+                        "Falling back to static mode.[/]"
+                    )
+                    failed_first = True
+                    break
+        if failed_first:
+            vuser_configs = []
+
+    # In distributed mode with pre-auth pool, disable PyO3 bridge for agents —
+    # agents will rotate through vuser_configs headers in pure Rust.
+    # check_* / on_stop are skipped in distributed (status-based errors only).
+    use_pyo3 = has_callbacks and not distributed
+
     return ScenarioPlan(
         name=s.name,
         rps=s.rps,
@@ -139,9 +190,10 @@ def _build_plan(scenario_file: Path, target: str, scenario_name: str | None = No
         mode="ramp",
         target_url=target,
         tasks=tasks,
-        scenario_file=str(scenario_file.resolve()) if has_callbacks else None,
-        scenario_class=s.name if has_callbacks else None,
-        n_vusers=n_vusers if has_callbacks else None,
+        scenario_file=str(scenario_file.resolve()) if use_pyo3 else None,
+        scenario_class=s.name if use_pyo3 else None,
+        n_vusers=n_vusers if use_pyo3 else None,
+        vuser_configs=vuser_configs,
         thresholds=s.thresholds,
     )
 
@@ -321,8 +373,9 @@ def run_command(
         )
         raise typer.Exit(0)
 
+    is_distributed = agents > 1 or external_agents > 0 or nats_url is not None
     try:
-        plan = _build_plan(scenario_file, target, scenario_name)
+        plan = _build_plan(scenario_file, target, scenario_name, distributed=is_distributed)
     except ValueError as exc:
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1)

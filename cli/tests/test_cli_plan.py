@@ -77,3 +77,67 @@ def test_wrong_name_error_lists_available(tmp_path):
 def test_no_scenarios_raises_value_error(tmp_path):
     with pytest.raises(ValueError, match="No @scenario"):
         _build_plan(tmp_path / "s.py", "http://localhost", scenario_name=None)
+
+
+# ── distributed mode ──────────────────────────────────────────────────────────
+
+def test_static_scenario_distributed_no_pyo3(tmp_path):
+    """Static scenario (no on_start) in distributed mode: no PyO3 bridge, no vuser_configs."""
+    @scenario(rps=10)
+    class StaticFlow(VUser):
+        @task()
+        def hit(self, client):
+            client.get("/ping")
+
+    plan = _build_plan(tmp_path / "s.py", "http://localhost", distributed=True)
+    assert plan.scenario_file is None
+    assert plan.scenario_class is None
+    assert plan.vuser_configs == []
+
+
+def test_non_distributed_with_on_start_uses_pyo3(tmp_path):
+    """Non-distributed scenario with on_start uses PyO3 bridge."""
+    @scenario(rps=10)
+    class AuthFlow(VUser):
+        def on_start(self, client):
+            self.token = "tok"
+
+        @task()
+        def hit(self, client):
+            client.get("/api", headers={"Authorization": f"Bearer {self.token}"})
+
+    plan = _build_plan(tmp_path / "s.py", "http://localhost", distributed=False)
+    assert plan.scenario_file is not None
+    assert plan.scenario_class == "AuthFlow"
+    assert plan.vuser_configs == []
+
+
+def test_distributed_with_on_start_disables_pyo3(tmp_path):
+    """Distributed mode with on_start: PyO3 bridge disabled even if on_start present."""
+    @scenario(rps=10)
+    class AuthFlow(VUser):
+        def on_start(self, client):
+            # on_start would fail against real server — pre-auth pool handles it
+            pass
+
+        @task()
+        def hit(self, client):
+            client.get("/api")
+
+    # distributed=True — on_start will fail (no real server), pre-auth falls back
+    plan = _build_plan(tmp_path / "s.py", "http://localhost", distributed=True)
+    # PyO3 bridge must be disabled regardless
+    assert plan.scenario_file is None
+    assert plan.scenario_class is None
+
+
+def test_distributed_vuser_configs_empty_when_no_on_start(tmp_path):
+    """No on_start → vuser_configs stays empty in distributed mode."""
+    @scenario(rps=5)
+    class SimpleFlow(VUser):
+        @task()
+        def ping(self, client):
+            client.get("/ping")
+
+    plan = _build_plan(tmp_path / "s.py", "http://localhost", distributed=True)
+    assert plan.vuser_configs == []
