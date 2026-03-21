@@ -23,6 +23,8 @@ class ScenarioDef:
     rps: int
     duration: str
     ramp_up: str
+    mode: str = "ramp"
+    steps: int = 5
     tasks: list[TaskDef] = field(default_factory=list)
     cls: Any = None
     thresholds: dict[str, float] = field(default_factory=dict)
@@ -42,19 +44,29 @@ def scenario(
     rps: int = 10,
     duration: str = "1m",
     ramp_up: str = "10s",
+    mode: str = "ramp",
+    steps: int = 5,
     thresholds: dict[str, float] | None = None,
 ):
     """Class decorator that registers a scenario definition.
 
     Args:
         rps: Target requests per second at peak load.
-        duration: Total test duration, e.g. "1m", "30s", "2m30s".
-        ramp_up: Time to ramp from 0 to target RPS, e.g. "10s", "1m".
+        duration: Test duration. For ``ramp`` mode this is the steady-state
+            duration (total = duration + ramp_up). For ``constant``, ``step``,
+            and ``spike`` it is the total test duration.
+        ramp_up: Ramp-up window for ``ramp`` mode (ignored by other modes).
+        mode: Load profile — ``"ramp"`` (default), ``"constant"``, ``"step"``,
+            or ``"spike"``.
+        steps: Number of equal load steps for ``mode="step"`` (default 5).
         thresholds: Optional SLA limits. If any are exceeded the CLI exits with
             code 1. Supported keys: ``p50_ms``, ``p95_ms``, ``p99_ms``,
             ``max_ms``, ``error_rate`` (percent, e.g. ``1.0`` = 1 %).
             Example: ``{"p99_ms": 500, "error_rate": 1.0}``
     """
+    valid_modes = {"ramp", "constant", "step", "spike"}
+    if mode not in valid_modes:
+        raise ValueError(f"Unknown mode {mode!r}. Valid: {sorted(valid_modes)}")
 
     def decorator(cls):
         s = ScenarioDef(
@@ -62,6 +74,8 @@ def scenario(
             rps=rps,
             duration=duration,
             ramp_up=ramp_up,
+            mode=mode,
+            steps=steps,
             thresholds=thresholds or {},
             cls=cls,
         )

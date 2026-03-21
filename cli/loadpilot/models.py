@@ -38,7 +38,8 @@ class ScenarioPlan(BaseModel):
     rps: int
     duration_secs: int
     ramp_up_secs: int
-    mode: Literal["constant", "ramp", "spike"] = "ramp"
+    mode: Literal["constant", "ramp", "step", "spike"] = "ramp"
+    steps: int = 5  # used by mode="step": number of equal steps over duration
     target_url: str
     tasks: list[TaskPlan] = Field(default_factory=list)
     data_pool: list[DataPoolEntry] = Field(default_factory=list)

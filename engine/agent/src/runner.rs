@@ -48,12 +48,22 @@ pub struct VUserConfig {
     pub task_headers: HashMap<String, HashMap<String, String>>,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode { Constant, Ramp, Step, Spike }
+
+impl Default for Mode { fn default() -> Self { Mode::Ramp } }
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Plan {
     pub name: String,
     pub rps: u64,
     pub duration_secs: u64,
     pub ramp_up_secs: u64,
+    #[serde(default)]
+    pub mode: Mode,
+    #[serde(default = "default_steps")]
+    pub steps: u64,
     pub target_url: String,
     #[serde(default)]
     pub tasks: Vec<TaskPlan>,
@@ -62,6 +72,61 @@ pub struct Plan {
     /// Pre-auth pool for distributed mode. Agents rotate through these.
     #[serde(default)]
     pub vuser_configs: Vec<VUserConfig>,
+}
+
+fn default_steps() -> u64 { 5 }
+
+fn compute_target_rps(elapsed_secs: f64, plan: &Plan) -> f64 {
+    let rps = plan.rps as f64;
+    match plan.mode {
+        Mode::Constant => rps,
+        Mode::Ramp => {
+            let ramp = plan.ramp_up_secs as f64;
+            if ramp > 0.0 && elapsed_secs < ramp { rps * elapsed_secs / ramp } else { rps }
+        }
+        Mode::Step => {
+            let steps = plan.steps.max(1) as f64;
+            let total = plan.duration_secs as f64;
+            let step_dur = total / steps;
+            let step_idx = (elapsed_secs / step_dur).floor().min(steps - 1.0);
+            rps * (step_idx + 1.0) / steps
+        }
+        Mode::Spike => {
+            let total = plan.duration_secs as f64;
+            let baseline = (rps * 0.2).max(1.0);
+            if elapsed_secs < total / 3.0 || elapsed_secs >= 2.0 * total / 3.0 {
+                baseline
+            } else {
+                rps
+            }
+        }
+    }
+}
+
+fn total_duration(plan: &Plan) -> Duration {
+    match plan.mode {
+        Mode::Ramp => Duration::from_secs(plan.duration_secs + plan.ramp_up_secs),
+        _ => Duration::from_secs(plan.duration_secs),
+    }
+}
+
+fn phase_str(elapsed_secs: f64, plan: &Plan) -> &'static str {
+    match plan.mode {
+        Mode::Ramp => {
+            if elapsed_secs < plan.ramp_up_secs as f64 { "ramp_up" } else { "steady" }
+        }
+        Mode::Spike => {
+            let total = plan.duration_secs as f64;
+            if elapsed_secs < total / 3.0 {
+                "steady"
+            } else if elapsed_secs < 2.0 * total / 3.0 {
+                "ramp_up"
+            } else {
+                "ramp_down"
+            }
+        }
+        _ => "steady",
+    }
 }
 
 // ── Metrics snapshot sent back to coordinator ─────────────────────────────────
@@ -227,11 +292,10 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
 
     let tasks = Arc::new(plan.tasks.clone());
     let base_url = Arc::new(plan.target_url.clone());
-    let duration = Duration::from_secs(plan.duration_secs);
-    let ramp_up = Duration::from_secs(plan.ramp_up_secs);
-    let target_rps = plan.rps;
+    let duration = total_duration(&plan);
+    let plan_arc = Arc::new(plan);
     // Pre-auth pool: Arc so workers can cheaply clone the reference.
-    let vuser_configs = Arc::new(plan.vuser_configs);
+    let vuser_configs = Arc::new(plan_arc.vuser_configs.clone());
     let pool_size = vuser_configs.len() as u64;
 
     let mut request_idx: u64 = 0;
@@ -244,19 +308,14 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
         let elapsed = start.elapsed();
 
         if elapsed >= duration {
-            let snap = counters.snapshot(elapsed.as_secs_f64(), 0.0, target_rps as f64, "done");
+            let snap = counters.snapshot(elapsed.as_secs_f64(), 0.0, plan_arc.rps as f64, "done");
             let _ = tx.send(snap).await;
             break;
         }
 
-        let phase = if elapsed < ramp_up { "ramp_up" } else { "steady" };
-
-        // Target RPS for this tick.
-        let t_rps = if elapsed < ramp_up {
-            target_rps as f64 * elapsed.as_secs_f64() / ramp_up.as_secs_f64()
-        } else {
-            target_rps as f64
-        };
+        let elapsed_secs = elapsed.as_secs_f64();
+        let phase = phase_str(elapsed_secs, &plan_arc);
+        let t_rps = compute_target_rps(elapsed_secs, &plan_arc);
 
         let requests_this_tick = (t_rps * tick_ms as f64 / 1000.0).round() as u64;
 
@@ -321,7 +380,7 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
             window_reqs = 0;
             window_start = Instant::now();
 
-            let snap = counters.snapshot(elapsed.as_secs_f64(), current_rps, t_rps, phase);
+            let snap = counters.snapshot(elapsed_secs, current_rps, t_rps, phase);
             let _ = tx.send(snap).await;
         }
 

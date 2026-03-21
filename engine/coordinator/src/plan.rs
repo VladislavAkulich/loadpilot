@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum Mode {
     Constant,
     Ramp,
+    Step,
     Spike,
 }
 
@@ -145,4 +146,9 @@ pub struct ScenarioPlan {
     /// produced by running on_start on the coordinator side.
     #[serde(default)]
     pub vuser_configs: Vec<VUserConfig>,
+    /// Number of load steps for mode=step (default 5).
+    #[serde(default = "default_steps")]
+    pub steps: u64,
 }
+
+fn default_steps() -> u64 { 5 }

@@ -16,6 +16,7 @@ async fn metrics_handler(State(snapshot): State<SharedSnapshot>) -> String {
     let phase = match snap.phase {
         crate::coordinator::Phase::RampUp => "ramp_up",
         crate::coordinator::Phase::Steady => "steady",
+        crate::coordinator::Phase::RampDown => "ramp_down",
         crate::coordinator::Phase::Done => "done",
     };
 

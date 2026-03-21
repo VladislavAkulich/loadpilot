@@ -22,7 +22,7 @@ use tokio::time::sleep;
 use std::sync::RwLock;
 
 use crate::metrics::{Metrics, LatencySnapshot};
-use crate::plan::{ScenarioPlan, TaskPlan};
+use crate::plan::{Mode, ScenarioPlan, TaskPlan};
 use crate::python_bridge::PythonBridge;
 
 pub type SharedSnapshot = Arc<RwLock<Option<MetricsSnapshot>>>;
@@ -33,6 +33,7 @@ pub type SharedSnapshot = Arc<RwLock<Option<MetricsSnapshot>>>;
 pub enum Phase {
     RampUp,
     Steady,
+    RampDown,
     Done,
 }
 
@@ -70,7 +71,12 @@ impl Coordinator {
 
         let start = Instant::now();
         let ramp_up = Duration::from_secs(plan.ramp_up_secs);
-        let total = Duration::from_secs(plan.duration_secs + plan.ramp_up_secs);
+        // For ramp mode, total = steady duration + ramp-up window.
+        // For all other modes, ramp_up_secs is unused and total = duration_secs.
+        let total = match plan.mode {
+            Mode::Ramp => Duration::from_secs(plan.duration_secs + plan.ramp_up_secs),
+            _ => Duration::from_secs(plan.duration_secs),
+        };
 
         let done_flag = Arc::new(AtomicBool::new(false));
         let active_workers = Arc::new(AtomicU64::new(0));
@@ -157,19 +163,11 @@ impl Coordinator {
             loop {
                 interval.tick().await;
                 let elapsed = start.elapsed();
-                let phase = if elapsed < ramp_up {
-                    Phase::RampUp
-                } else if elapsed < total {
-                    Phase::Steady
+                let (phase, target_rps) = if elapsed >= total {
+                    (Phase::Done, 0.0)
                 } else {
-                    Phase::Done
+                    compute_phase_and_rps(elapsed.as_secs_f64(), &plan_clone)
                 };
-
-                let target_rps = compute_target_rps(
-                    elapsed.as_secs_f64(),
-                    plan_clone.ramp_up_secs as f64,
-                    plan_clone.rps as f64,
-                );
 
                 let (window_reqs, _) = metrics_reporter.drain_window();
                 let snap = MetricsSnapshot {
@@ -227,11 +225,7 @@ impl Coordinator {
             let dt = now.duration_since(last_tick).as_secs_f64();
             last_tick = now;
 
-            let target_rps = compute_target_rps(
-                elapsed.as_secs_f64(),
-                plan.ramp_up_secs as f64,
-                plan.rps as f64,
-            );
+            let (_, target_rps) = compute_phase_and_rps(elapsed.as_secs_f64(), &plan);
 
             deficit += target_rps * dt;
             let n_requests = deficit.floor() as usize;
@@ -380,11 +374,48 @@ impl Coordinator {
     }
 }
 
-fn compute_target_rps(elapsed_secs: f64, ramp_up_secs: f64, target_rps: f64) -> f64 {
-    if ramp_up_secs <= 0.0 || elapsed_secs >= ramp_up_secs {
-        return target_rps;
+/// Compute the current (phase, target_rps) for the given elapsed time and plan.
+///
+/// Modes:
+///   constant — full RPS immediately, no ramp.
+///   ramp     — linear ramp from 0 to target over ramp_up_secs, then steady.
+///   step     — divide duration_secs into `steps` equal windows; each window
+///              runs at rps * step_number / steps.
+///   spike    — divide duration_secs into thirds: baseline (20% rps) →
+///              peak (100% rps) → recovery (20% rps).
+fn compute_phase_and_rps(elapsed_secs: f64, plan: &ScenarioPlan) -> (Phase, f64) {
+    let rps = plan.rps as f64;
+    match plan.mode {
+        Mode::Constant => (Phase::Steady, rps),
+        Mode::Ramp => {
+            let ramp = plan.ramp_up_secs as f64;
+            if ramp > 0.0 && elapsed_secs < ramp {
+                (Phase::RampUp, rps * elapsed_secs / ramp)
+            } else {
+                (Phase::Steady, rps)
+            }
+        }
+        Mode::Step => {
+            let steps = plan.steps.max(1) as f64;
+            let total = plan.duration_secs as f64;
+            let step_dur = total / steps;
+            let step_idx = (elapsed_secs / step_dur).floor().min(steps - 1.0);
+            (Phase::Steady, rps * (step_idx + 1.0) / steps)
+        }
+        Mode::Spike => {
+            let total = plan.duration_secs as f64;
+            let t1 = total / 3.0;
+            let t2 = 2.0 * total / 3.0;
+            let baseline = (rps * 0.2).max(1.0);
+            if elapsed_secs < t1 {
+                (Phase::Steady, baseline)
+            } else if elapsed_secs < t2 {
+                (Phase::RampUp, rps)
+            } else {
+                (Phase::RampDown, baseline)
+            }
+        }
     }
-    target_rps * (elapsed_secs / ramp_up_secs)
 }
 
 fn pick_task<'a>(tasks: &'a [TaskPlan], index: usize) -> &'a TaskPlan {
@@ -466,37 +497,90 @@ mod tests {
         }
     }
 
-    // ── compute_target_rps ────────────────────────────────────────────────────
+    // ── compute_phase_and_rps ─────────────────────────────────────────────────
+
+    fn plan_for_mode(mode: Mode, rps: u64, duration: u64, ramp_up: u64, steps: u64) -> ScenarioPlan {
+        ScenarioPlan {
+            name: "T".into(), rps, duration_secs: duration, ramp_up_secs: ramp_up,
+            mode, target_url: "http://localhost".into(),
+            tasks: vec![], scenario_file: None, scenario_class: None, n_vusers: None,
+            vuser_configs: vec![], steps,
+        }
+    }
 
     #[test]
-    fn target_rps_before_ramp_scales_linearly() {
-        // At 50% of ramp-up time, target should be 50% of peak RPS.
-        let rps = compute_target_rps(5.0, 10.0, 100.0);
+    fn ramp_before_ramp_scales_linearly() {
+        let plan = plan_for_mode(Mode::Ramp, 100, 60, 10, 5);
+        let (phase, rps) = compute_phase_and_rps(5.0, &plan);
+        assert_eq!(phase, Phase::RampUp);
         assert!((rps - 50.0).abs() < 0.01);
     }
 
     #[test]
-    fn target_rps_after_ramp_is_full() {
-        let rps = compute_target_rps(15.0, 10.0, 100.0);
+    fn ramp_after_ramp_is_full() {
+        let plan = plan_for_mode(Mode::Ramp, 100, 60, 10, 5);
+        let (phase, rps) = compute_phase_and_rps(15.0, &plan);
+        assert_eq!(phase, Phase::Steady);
         assert_eq!(rps, 100.0);
     }
 
     #[test]
-    fn target_rps_at_ramp_boundary_is_full() {
-        let rps = compute_target_rps(10.0, 10.0, 100.0);
-        assert_eq!(rps, 100.0);
-    }
-
-    #[test]
-    fn target_rps_zero_ramp_up_is_full() {
-        let rps = compute_target_rps(0.0, 0.0, 100.0);
-        assert_eq!(rps, 100.0);
-    }
-
-    #[test]
-    fn target_rps_start_of_ramp_is_zero() {
-        let rps = compute_target_rps(0.0, 10.0, 100.0);
+    fn ramp_start_is_zero() {
+        let plan = plan_for_mode(Mode::Ramp, 100, 60, 10, 5);
+        let (phase, rps) = compute_phase_and_rps(0.0, &plan);
+        assert_eq!(phase, Phase::RampUp);
         assert_eq!(rps, 0.0);
+    }
+
+    #[test]
+    fn constant_always_full_rps() {
+        let plan = plan_for_mode(Mode::Constant, 100, 60, 10, 5);
+        for t in [0.0, 1.0, 30.0, 59.9] {
+            let (phase, rps) = compute_phase_and_rps(t, &plan);
+            assert_eq!(phase, Phase::Steady);
+            assert_eq!(rps, 100.0);
+        }
+    }
+
+    #[test]
+    fn step_first_step_is_fraction() {
+        // 5 steps over 60s → each step = 12s. At t=5 (step 0): rps = 100*1/5 = 20.
+        let plan = plan_for_mode(Mode::Step, 100, 60, 0, 5);
+        let (_, rps) = compute_phase_and_rps(5.0, &plan);
+        assert!((rps - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn step_last_step_is_full_rps() {
+        // At t=55 (step 4): rps = 100*5/5 = 100.
+        let plan = plan_for_mode(Mode::Step, 100, 60, 0, 5);
+        let (_, rps) = compute_phase_and_rps(55.0, &plan);
+        assert!((rps - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn spike_middle_third_is_peak() {
+        // duration=60s → spike at 20s–40s.
+        let plan = plan_for_mode(Mode::Spike, 100, 60, 0, 5);
+        let (phase, rps) = compute_phase_and_rps(30.0, &plan);
+        assert_eq!(phase, Phase::RampUp);
+        assert_eq!(rps, 100.0);
+    }
+
+    #[test]
+    fn spike_final_third_is_recovery() {
+        let plan = plan_for_mode(Mode::Spike, 100, 60, 0, 5);
+        let (phase, rps) = compute_phase_and_rps(50.0, &plan);
+        assert_eq!(phase, Phase::RampDown);
+        assert!((rps - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn spike_first_third_is_baseline() {
+        let plan = plan_for_mode(Mode::Spike, 100, 60, 0, 5);
+        let (phase, rps) = compute_phase_and_rps(5.0, &plan);
+        assert_eq!(phase, Phase::Steady);
+        assert!((rps - 20.0).abs() < 0.01);
     }
 
     // ── pick_task ─────────────────────────────────────────────────────────────

@@ -227,22 +227,39 @@ Model your real traffic distribution directly.
 
 ### `@scenario`
 
-| Parameter    | Type               | Default | Description                                      |
-|--------------|--------------------|---------|--------------------------------------------------|
-| `rps`        | `int`              | `10`    | Target requests per second                       |
-| `duration`   | `str`              | `"1m"`  | Total run time (`"30s"`, `"2m"`)                 |
-| `ramp_up`    | `str`              | `"10s"` | Time to reach target RPS from 0                  |
-| `thresholds` | `dict[str, float]` | `{}`    | SLA limits — test fails with exit code 1 if breached |
+| Parameter    | Type               | Default    | Description                                      |
+|--------------|--------------------|------------|--------------------------------------------------|
+| `rps`        | `int`              | `10`       | Target requests per second at peak load          |
+| `duration`   | `str`              | `"1m"`     | Steady-state duration for `ramp`; total duration for all other modes |
+| `ramp_up`    | `str`              | `"10s"`    | Ramp-up window (used only by `mode="ramp"`)      |
+| `mode`       | `str`              | `"ramp"`   | Load profile — see table below                   |
+| `steps`      | `int`              | `5`        | Number of steps for `mode="step"`                |
+| `thresholds` | `dict[str, float]` | `{}`       | SLA limits — test fails with exit code 1 if breached |
 
-Supported threshold keys: `p50_ms`, `p95_ms`, `p99_ms`, `max_ms`, `error_rate` (percent).
+#### Load profiles
+
+| Mode        | Behaviour |
+|-------------|-----------|
+| `ramp`      | Linear ramp from 0 → target RPS over `ramp_up`, then steady. Total = `duration + ramp_up`. |
+| `constant`  | Full target RPS immediately, no ramp. Total = `duration`. |
+| `step`      | Divide `duration` into `steps` equal windows; each window runs at `rps × step/steps`. |
+| `spike`     | Divide `duration` into thirds: 20% RPS (baseline) → 100% RPS (spike) → 20% RPS (recovery). |
 
 ```python
-@scenario(
-    rps=50,
-    duration="2m",
-    thresholds={"p99_ms": 500, "error_rate": 1.0},
-)
+# ramp (default)
+@scenario(rps=100, duration="2m", ramp_up="15s", mode="ramp")
+
+# constant — no warm-up, full load immediately
+@scenario(rps=100, duration="2m", mode="constant")
+
+# step — 5 steps: 20 → 40 → 60 → 80 → 100 RPS, 30s each
+@scenario(rps=100, duration="2m30s", mode="step", steps=5)
+
+# spike — 20 RPS for 40s, burst to 100 RPS for 40s, recover for 40s
+@scenario(rps=100, duration="2m", mode="spike")
 ```
+
+Supported threshold keys: `p50_ms`, `p95_ms`, `p99_ms`, `max_ms`, `error_rate` (percent).
 
 ### `@task`
 
@@ -593,7 +610,7 @@ disappears entirely.
 | v0.5 | Multiple `@scenario` per file | ✅ done |
 | v0.5 | Pre-auth pool — `on_start` supported in distributed mode | ✅ done |
 | v0.5 | Histogram merging for accurate percentiles in distributed mode | ✅ done |
-| v0.5 | Spike / step / constant load profiles | planned |
+| v0.5 | Spike / step / constant load profiles | ✅ done |
 | v0.5 | GitHub Releases + verify install.sh end-to-end | planned |
 | v1.0 | Production-hardened distributed mode, public benchmark | planned |
 
