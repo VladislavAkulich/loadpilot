@@ -48,6 +48,10 @@ struct ShardMsg {
     #[allow(dead_code)]
     agent_id: String,
     plan: runner::Plan,
+    /// Unix timestamp (ms) at which this agent should start. Coordinator sends
+    /// `now + 2000ms` so all agents begin simultaneously regardless of network lag.
+    #[serde(default)]
+    start_at_unix_ms: u64,
 }
 
 #[derive(Deserialize)]
@@ -91,12 +95,12 @@ async fn run_once(args: &Args) -> Result<()> {
     eprintln!("[agent {}] registered — waiting for plan shard...", args.agent_id);
 
     // Wait for shard plan or stop signal.
-    let plan = loop {
+    let msg: ShardMsg = loop {
         let (subject, payload) = nats.next_message().await?;
         if subject == shard_subject {
             let msg: ShardMsg = serde_json::from_slice(&payload)?;
             eprintln!("[agent {}] received shard ({} RPS)", args.agent_id, msg.plan.rps);
-            break msg.plan;
+            break msg;
         }
         if subject == "loadpilot.control" {
             if let Ok(ctrl) = serde_json::from_slice::<ControlMsg>(&payload) {
@@ -108,8 +112,21 @@ async fn run_once(args: &Args) -> Result<()> {
         }
     };
 
+    // Synchronised start: sleep until start_at_unix_ms to align all agents.
+    if msg.start_at_unix_ms > 0 {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if msg.start_at_unix_ms > now_ms {
+            let wait_ms = msg.start_at_unix_ms - now_ms;
+            eprintln!("[agent {}] waiting {wait_ms}ms for synchronised start...", args.agent_id);
+            sleep(Duration::from_millis(wait_ms)).await;
+        }
+    }
+
     // Run load test.
-    let mut metrics_rx = run_load(plan).await;
+    let mut metrics_rx = run_load(msg.plan).await;
     let mut tick = interval(Duration::from_secs(1));
 
     loop {

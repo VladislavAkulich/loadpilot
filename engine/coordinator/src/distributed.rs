@@ -39,6 +39,9 @@ struct RegisterMsg {
 struct ShardMsg {
     agent_id: String,
     plan: ScenarioPlan,
+    /// Unix timestamp (ms) at which all agents should start the test simultaneously.
+    /// Coordinator sets this to `now + 2000ms` so agents can synchronise clocks.
+    start_at_unix_ms: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -265,12 +268,18 @@ async fn run_with_embedded_broker(
         }
     }).await.context("Timed out waiting for agents to register")?;
 
+    // All agents start at the same wall-clock time to eliminate clock skew.
+    let start_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64 + 2_000;
+
     for (idx, agent_id) in registered.iter().enumerate() {
         let shard_plan = shard(&plan, n_agents, idx);
-        let msg = ShardMsg { agent_id: agent_id.clone(), plan: shard_plan };
+        let msg = ShardMsg { agent_id: agent_id.clone(), plan: shard_plan, start_at_unix_ms };
         let payload = serde_json::to_vec(&msg)?;
         broker::publish(&broker, &subject_shard(agent_id), &payload).await;
-        eprintln!("[distributed] sent plan shard to {agent_id} ({} RPS)", msg.plan.rps);
+        eprintln!("[distributed] sent plan shard to {agent_id} ({} RPS, start_at +2s)", msg.plan.rps);
     }
 
     aggregate_loop(&mut metrics_rx, n_agents, &shared_snapshot).await?;
@@ -287,8 +296,15 @@ async fn run_with_embedded_broker(
     Ok(())
 }
 
+/// How long without a metric update before an agent is considered timed-out.
+const AGENT_TIMEOUT_SECS: u64 = 15;
+
 /// Metrics aggregation loop — shared by embedded and external NATS modes.
 /// Reads from `metrics_rx`, emits aggregated JSON to stdout, updates Prometheus.
+///
+/// NATS SPOF protection: if an agent stops reporting for AGENT_TIMEOUT_SECS,
+/// it is marked as timed-out and excluded from the completion count so the
+/// test can still finish even if one agent dies.
 async fn aggregate_loop(
     metrics_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     n_agents: usize,
@@ -296,12 +312,33 @@ async fn aggregate_loop(
 ) -> Result<()> {
     let mut last_snapshots: std::collections::HashMap<String, AgentMetricsMsg> =
         std::collections::HashMap::new();
+    let mut last_seen: std::collections::HashMap<String, std::time::Instant> =
+        std::collections::HashMap::new();
+    let mut timed_out: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut tick = interval(Duration::from_secs(1));
     let mut done_count = 0;
+    // effective_agents shrinks when agents time out.
+    let mut effective_agents = n_agents;
 
     loop {
         tokio::select! {
             _ = tick.tick() => {
+                // Check for timed-out agents.
+                let now = std::time::Instant::now();
+                for (agent_id, &seen) in &last_seen {
+                    if !timed_out.contains(agent_id)
+                        && now.duration_since(seen).as_secs() > AGENT_TIMEOUT_SECS
+                    {
+                        eprintln!(
+                            "[distributed] WARNING: agent {agent_id} has not reported \
+                             for {}s — treating as timed-out",
+                            AGENT_TIMEOUT_SECS
+                        );
+                        timed_out.insert(agent_id.clone());
+                        effective_agents = effective_agents.saturating_sub(1);
+                    }
+                }
+
                 let snaps: Vec<AgentMetricsMsg> = last_snapshots.values().map(|s| AgentMetricsMsg {
                     agent_id: s.agent_id.clone(),
                     elapsed_secs: s.elapsed_secs,
@@ -319,13 +356,19 @@ async fn aggregate_loop(
                 println!("{}", serde_json::to_string(&agg)?);
                 update_prometheus(shared_snapshot, &agg);
 
-                if done_count >= n_agents {
+                if done_count + timed_out.len() >= effective_agents.max(1) {
                     break;
                 }
             }
 
             Some(payload) = metrics_rx.recv() => {
                 if let Ok(msg) = serde_json::from_slice::<AgentMetricsMsg>(&payload) {
+                    // If a timed-out agent recovers, restore it.
+                    if timed_out.remove(&msg.agent_id) {
+                        eprintln!("[distributed] agent {} recovered", msg.agent_id);
+                        effective_agents = (effective_agents + 1).min(n_agents);
+                    }
+                    last_seen.insert(msg.agent_id.clone(), std::time::Instant::now());
                     if msg.phase == "done" { done_count += 1; }
                     last_snapshots.insert(msg.agent_id.clone(), msg);
                 }
@@ -400,13 +443,19 @@ pub async fn run_with_nats_url(
         }
     }
 
+    // All agents start at the same wall-clock time to eliminate clock skew.
+    let start_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64 + 2_000;
+
     // Send shards.
     for (idx, agent_id) in registered.iter().enumerate() {
         let shard_plan = shard(&plan, n_agents, idx);
-        let msg = ShardMsg { agent_id: agent_id.clone(), plan: shard_plan };
+        let msg = ShardMsg { agent_id: agent_id.clone(), plan: shard_plan, start_at_unix_ms };
         let payload = serde_json::to_vec(&msg)?;
         nats.publish(&subject_shard(agent_id), &payload).await?;
-        eprintln!("[distributed] sent shard to {agent_id} ({} RPS)", msg.plan.rps);
+        eprintln!("[distributed] sent shard to {agent_id} ({} RPS, start_at +2s)", msg.plan.rps);
     }
 
     // Aggregate metrics via a channel fed from the NATS read loop.
