@@ -2,8 +2,8 @@ import pytest
 
 from loadpilot.models import ScenarioPlan, TaskPlan, parse_duration
 
-
 # ── parse_duration ────────────────────────────────────────────────────────────
+
 
 def test_parse_duration_seconds():
     assert parse_duration("30s") == 30
@@ -32,6 +32,7 @@ def test_parse_duration_unknown_unit():
 
 # ── TaskPlan ──────────────────────────────────────────────────────────────────
 
+
 def test_task_plan_defaults():
     t = TaskPlan(name="read", url="/api/data")
     assert t.method == "GET"
@@ -55,6 +56,7 @@ def test_task_plan_explicit_fields():
 
 
 # ── ScenarioPlan ──────────────────────────────────────────────────────────────
+
 
 def test_scenario_plan_required_fields():
     plan = ScenarioPlan(
@@ -88,7 +90,10 @@ def test_scenario_plan_json_roundtrip():
 
 def test_scenario_plan_bridge_fields_default_none():
     plan = ScenarioPlan(
-        name="S", rps=1, duration_secs=10, ramp_up_secs=5,
+        name="S",
+        rps=1,
+        duration_secs=10,
+        ramp_up_secs=5,
         target_url="http://localhost",
     )
     assert plan.scenario_file is None
@@ -98,7 +103,10 @@ def test_scenario_plan_bridge_fields_default_none():
 
 def test_scenario_plan_with_bridge_fields():
     plan = ScenarioPlan(
-        name="S", rps=10, duration_secs=60, ramp_up_secs=10,
+        name="S",
+        rps=10,
+        duration_secs=60,
+        ramp_up_secs=10,
         target_url="http://localhost",
         scenario_file="/path/to/scenario.py",
         scenario_class="MyFlow",

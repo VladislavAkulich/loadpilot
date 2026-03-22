@@ -12,6 +12,7 @@ def clear_scenarios():
 
 # ── @scenario decorator ───────────────────────────────────────────────────────
 
+
 def test_scenario_registers_class():
     @scenario(rps=50, duration="1m", ramp_up="10s")
     class MyFlow(VUser):
@@ -59,6 +60,7 @@ def test_multiple_scenarios_registered():
 
 
 # ── @task decorator ───────────────────────────────────────────────────────────
+
 
 def test_task_weight_collected():
     @scenario(rps=10)
@@ -123,6 +125,7 @@ def test_non_task_methods_not_collected():
 
 # ── VUser base class ──────────────────────────────────────────────────────────
 
+
 def test_vuser_on_start_is_noop():
     u = VUser()
     u.on_start(None)  # must not raise
@@ -134,6 +137,7 @@ def test_vuser_on_stop_is_noop():
 
 
 # ── _clear_scenarios ──────────────────────────────────────────────────────────
+
 
 def test_clear_scenarios_empties_list():
     @scenario(rps=10)

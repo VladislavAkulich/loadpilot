@@ -99,7 +99,11 @@ impl RustClient {
 
     fn build_url(&self, path: &str) -> String {
         let base = self.base_url.trim_end_matches('/');
-        let p = if path.starts_with('/') { path.to_string() } else { format!("/{}", path) };
+        let p = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{}", path)
+        };
         format!("{}{}", base, p)
     }
 
@@ -121,47 +125,49 @@ impl RustClient {
         // Release the GIL while waiting for the HTTP response so other VUser
         // threads can run their Python code concurrently. All captured values
         // are Send Rust types — no Python objects cross the allow_threads boundary.
-        let http_result = py.detach(|| handle.block_on(async move {
-            let mut req = match method_upper.as_str() {
-                "GET" => client.get(&url),
-                "POST" => client.post(&url),
-                "PUT" => client.put(&url),
-                "PATCH" => client.patch(&url),
-                "DELETE" => client.delete(&url),
-                other => return Err(format!("Unknown HTTP method: {}", other)),
-            };
-            for (k, v) in &req_headers {
-                req = req.header(k.as_str(), v.as_str());
-            }
-            if let Some(b) = body {
-                if is_form {
-                    req = req
-                        .header("Content-Type", "application/x-www-form-urlencoded")
-                        .body(b);
-                } else {
-                    req = req.header("Content-Type", "application/json").body(b);
+        let http_result = py.detach(|| {
+            handle.block_on(async move {
+                let mut req = match method_upper.as_str() {
+                    "GET" => client.get(&url),
+                    "POST" => client.post(&url),
+                    "PUT" => client.put(&url),
+                    "PATCH" => client.patch(&url),
+                    "DELETE" => client.delete(&url),
+                    other => return Err(format!("Unknown HTTP method: {}", other)),
+                };
+                for (k, v) in &req_headers {
+                    req = req.header(k.as_str(), v.as_str());
                 }
-            }
-            match req.send().await {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    let resp_headers: HashMap<String, String> = resp
-                        .headers()
-                        .iter()
-                        .filter_map(|(k, v)| {
-                            Some((k.as_str().to_string(), v.to_str().ok()?.to_string()))
-                        })
-                        .collect();
-                    let body_text = resp.text().await.unwrap_or_default();
-                    // Parse JSON while the GIL is still released — serde_json is
-                    // pure Rust and needs no Python runtime. The resulting Value
-                    // is converted to a Py<PyAny> after py.detach() exits below.
-                    let json_parsed = parse_json_body(&body_text);
-                    Ok((status, resp_headers, body_text, json_parsed))
+                if let Some(b) = body {
+                    if is_form {
+                        req = req
+                            .header("Content-Type", "application/x-www-form-urlencoded")
+                            .body(b);
+                    } else {
+                        req = req.header("Content-Type", "application/json").body(b);
+                    }
                 }
-                Err(e) => Err(e.to_string()),
-            }
-        }));
+                match req.send().await {
+                    Ok(resp) => {
+                        let status = resp.status().as_u16();
+                        let resp_headers: HashMap<String, String> = resp
+                            .headers()
+                            .iter()
+                            .filter_map(|(k, v)| {
+                                Some((k.as_str().to_string(), v.to_str().ok()?.to_string()))
+                            })
+                            .collect();
+                        let body_text = resp.text().await.unwrap_or_default();
+                        // Parse JSON while the GIL is still released — serde_json is
+                        // pure Rust and needs no Python runtime. The resulting Value
+                        // is converted to a Py<PyAny> after py.detach() exits below.
+                        let json_parsed = parse_json_body(&body_text);
+                        Ok((status, resp_headers, body_text, json_parsed))
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            })
+        });
 
         let elapsed_ms = t0.elapsed().as_millis() as u64;
 
@@ -282,14 +288,29 @@ impl RustClient {
                     is_form = true;
                 }
 
-                Ok(ReqSpec { method, url, headers, body, is_form })
+                Ok(ReqSpec {
+                    method,
+                    url,
+                    headers,
+                    body,
+                    is_form,
+                })
             })
             .collect::<PyResult<_>>()?;
 
         let client = self.http_client.clone();
         let handle = self.rt_handle.clone();
 
-        type HttpOutcome = Result<(u64, u16, HashMap<String, String>, String, Option<serde_json::Value>), (u64, String)>;
+        type HttpOutcome = Result<
+            (
+                u64,
+                u16,
+                HashMap<String, String>,
+                String,
+                Option<serde_json::Value>,
+            ),
+            (u64, String),
+        >;
 
         // Release the GIL for all concurrent HTTP. All captured values are Send
         // Rust types — no Python objects cross the py.detach boundary.
@@ -301,12 +322,12 @@ impl RustClient {
                     set.spawn(async move {
                         let t0 = Instant::now();
                         let mut req = match spec.method.as_str() {
-                            "GET"    => c.get(&spec.url),
-                            "POST"   => c.post(&spec.url),
-                            "PUT"    => c.put(&spec.url),
-                            "PATCH"  => c.patch(&spec.url),
+                            "GET" => c.get(&spec.url),
+                            "POST" => c.post(&spec.url),
+                            "PUT" => c.put(&spec.url),
+                            "PATCH" => c.patch(&spec.url),
                             "DELETE" => c.delete(&spec.url),
-                            other    => {
+                            other => {
                                 let ms = t0.elapsed().as_millis() as u64;
                                 return Err((ms, format!("Unknown method: {}", other)));
                             }
@@ -317,9 +338,10 @@ impl RustClient {
                         if let Some(ref b) = spec.body {
                             req = if spec.is_form {
                                 req.header("Content-Type", "application/x-www-form-urlencoded")
-                                   .body(b.clone())
+                                    .body(b.clone())
                             } else {
-                                req.header("Content-Type", "application/json").body(b.clone())
+                                req.header("Content-Type", "application/json")
+                                    .body(b.clone())
                             };
                         }
                         match req.send().await {
@@ -380,7 +402,6 @@ impl RustClient {
         }
         Ok(responses)
     }
-
 }
 
 #[pymethods]
@@ -541,15 +562,17 @@ impl PythonBridge {
 
             std::thread::Builder::new()
                 .name(format!("vuser-{}", idx))
-                .spawn(move || {
-                    vuser_thread_main(instance, rx, base_url, http_client, rt_handle)
-                })
+                .spawn(move || vuser_thread_main(instance, rx, base_url, http_client, rt_handle))
                 .map_err(|e| anyhow!("failed to spawn VUser thread {}: {}", idx, e))?;
 
             senders.push(tx);
         }
 
-        Ok(PythonBridge { senders, has_on_start, has_on_stop })
+        Ok(PythonBridge {
+            senders,
+            has_on_start,
+            has_on_stop,
+        })
     }
 
     pub fn n_vusers(&self) -> usize {
@@ -625,9 +648,8 @@ fn vuser_thread_main(
             None | Some(VUserMsg::Shutdown) => break,
 
             Some(VUserMsg::OnStart(reply)) => {
-                let result = Python::attach(|py| {
-                    do_on_start(py, &instance, &base_url, event_loop.as_ref())
-                });
+                let result =
+                    Python::attach(|py| do_on_start(py, &instance, &base_url, event_loop.as_ref()));
                 let _ = reply.send(result);
             }
 
@@ -647,9 +669,8 @@ fn vuser_thread_main(
             }
 
             Some(VUserMsg::OnStop(reply)) => {
-                let result = Python::attach(|py| {
-                    do_on_stop(py, &instance, &base_url, event_loop.as_ref())
-                });
+                let result =
+                    Python::attach(|py| do_on_stop(py, &instance, &base_url, event_loop.as_ref()));
                 let _ = reply.send(result);
                 break;
             }
@@ -672,10 +693,10 @@ fn do_on_start(
     event_loop: Option<&Py<PyAny>>,
 ) -> Result<()> {
     let client = make_real_client(py, base_url)?;
-    let call_result = instance.call_method1(py, "on_start", (client,))
+    let call_result = instance
+        .call_method1(py, "on_start", (client,))
         .map(|p| p.into_bound(py));
-    run_maybe_coro(py, call_result, event_loop)
-        .map_err(|e| anyhow!("on_start error: {}", e))
+    run_maybe_coro(py, call_result, event_loop).map_err(|e| anyhow!("on_start error: {}", e))
 }
 
 fn do_on_stop(
@@ -685,10 +706,10 @@ fn do_on_stop(
     event_loop: Option<&Py<PyAny>>,
 ) -> Result<()> {
     let client = make_real_client(py, base_url)?;
-    let call_result = instance.call_method1(py, "on_stop", (client,))
+    let call_result = instance
+        .call_method1(py, "on_stop", (client,))
         .map(|p| p.into_bound(py));
-    run_maybe_coro(py, call_result, event_loop)
-        .map_err(|e| anyhow!("on_stop error: {}", e))
+    run_maybe_coro(py, call_result, event_loop).map_err(|e| anyhow!("on_stop error: {}", e))
 }
 
 fn do_run_task(
@@ -725,9 +746,10 @@ fn do_run_task(
     // objects, no descriptor-protocol overhead. check_*(self, status_code, body)
     // receives a Python int and a pre-built dict (or None), so the only Python
     // work left inside check_* is native comparisons and dict lookups.
-    let last_status: Option<u16> = rc.last_response.as_ref()
-        .map(|r| r.borrow(py).status_code);
-    let last_json: Option<Py<PyAny>> = rc.last_response.as_ref()
+    let last_status: Option<u16> = rc.last_response.as_ref().map(|r| r.borrow(py).status_code);
+    let last_json: Option<Py<PyAny>> = rc
+        .last_response
+        .as_ref()
         .and_then(|r| r.borrow(py).json_cache.as_ref().map(|j| j.clone_ref(py)));
     drop(rc);
 
@@ -761,8 +783,17 @@ fn do_run_task(
         .into_iter()
         .enumerate()
         .map(|(i, (elapsed_ms, status))| {
-            let success = if i == n - 1 && check_failed { false } else { status < 400 };
-            CallResult { elapsed_ms, status_code: status, success, error: None }
+            let success = if i == n - 1 && check_failed {
+                false
+            } else {
+                status < 400
+            };
+            CallResult {
+                elapsed_ms,
+                status_code: status,
+                success,
+                error: None,
+            }
         })
         .collect())
 }
@@ -785,9 +816,7 @@ fn run_maybe_coro<'py>(
 ) -> PyResult<()> {
     let ret = call_result?;
     let asyncio = py.import("asyncio")?;
-    let is_coro: bool = asyncio
-        .call_method1("iscoroutine", (&ret,))?
-        .extract()?;
+    let is_coro: bool = asyncio.call_method1("iscoroutine", (&ret,))?.extract()?;
     if is_coro {
         // Fast path: drive the coroutine with a single send(None).
         // For async def bodies that contain no real `await` expressions
@@ -888,7 +917,11 @@ fn json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<PyAny>> 
             if let Some(i) = n.as_i64() {
                 Ok(i.into_pyobject(py)?.into_any().unbind())
             } else {
-                Ok(n.as_f64().unwrap_or(0.0).into_pyobject(py)?.into_any().unbind())
+                Ok(n.as_f64()
+                    .unwrap_or(0.0)
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
             }
         }
         serde_json::Value::String(s) => Ok(s.clone().into_pyobject(py)?.into_any().unbind()),
@@ -977,9 +1010,7 @@ mod tests {
         Python::attach(|py| {
             let locals = PyDict::new(py);
             py.run(
-                pyo3::ffi::c_str!(
-                    "async def f(): raise ValueError('boom')\ncoro = f()"
-                ),
+                pyo3::ffi::c_str!("async def f(): raise ValueError('boom')\ncoro = f()"),
                 None,
                 Some(&locals),
             )
@@ -1078,7 +1109,12 @@ mod tests {
             let dict = v.bind(py).cast::<PyDict>().unwrap();
             let user = dict.get_item("user").unwrap().unwrap();
             let user_dict = user.cast::<PyDict>().unwrap();
-            let id: i64 = user_dict.get_item("id").unwrap().unwrap().extract().unwrap();
+            let id: i64 = user_dict
+                .get_item("id")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
             assert_eq!(id, 1);
         });
     }
@@ -1231,7 +1267,10 @@ mod tests {
             // Connection refused → RuntimeError from the network, not a parse error.
             assert!(result.is_err());
             let msg = result.unwrap_err().to_string();
-            assert!(!msg.contains("missing 'path'"), "got parse error, not network: {msg}");
+            assert!(
+                !msg.contains("missing 'path'"),
+                "got parse error, not network: {msg}"
+            );
         });
     }
 }

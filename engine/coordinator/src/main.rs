@@ -62,13 +62,22 @@ async fn main() -> Result<()> {
 
     if let Some(nats_url) = args.nats_url {
         if args.external_agents == 0 {
-            anyhow::bail!("--nats-url requires --external-agents N (how many remote agents to wait for)");
+            anyhow::bail!(
+                "--nats-url requires --external-agents N (how many remote agents to wait for)"
+            );
         }
-        distributed::run_with_nats_url(plan, args.external_agents, &nats_url, shared_snapshot).await?;
+        distributed::run_with_nats_url(plan, args.external_agents, &nats_url, shared_snapshot)
+            .await?;
     } else if args.local_agents > 0 {
         distributed::run(plan, args.local_agents, &args.broker_addr, shared_snapshot).await?;
     } else if args.external_agents > 0 {
-        distributed::run_external_agents(plan, args.external_agents, &args.broker_addr, shared_snapshot).await?;
+        distributed::run_external_agents(
+            plan,
+            args.external_agents,
+            &args.broker_addr,
+            shared_snapshot,
+        )
+        .await?;
     } else {
         let coord = coordinator::Coordinator::new(plan);
         coord.run(shared_snapshot).await?;

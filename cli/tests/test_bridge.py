@@ -4,8 +4,8 @@ import pytest
 
 from loadpilot._bridge import AllCallsMockClient, CheckResponse, MockClient, MockResponse
 
-
 # ── MockResponse ──────────────────────────────────────────────────────────────
+
 
 def test_mock_response_defaults():
     r = MockResponse()
@@ -20,6 +20,7 @@ def test_mock_response_raise_for_status_is_noop():
 
 
 # ── MockClient — capture ──────────────────────────────────────────────────────
+
 
 def test_mock_client_captures_get():
     c = MockClient()
@@ -66,13 +67,16 @@ def test_mock_client_returns_mock_response():
     assert isinstance(c.delete("/ping"), MockResponse)
 
 
-@pytest.mark.parametrize("method_name,expected", [
-    ("get", "GET"),
-    ("post", "POST"),
-    ("put", "PUT"),
-    ("patch", "PATCH"),
-    ("delete", "DELETE"),
-])
+@pytest.mark.parametrize(
+    "method_name,expected",
+    [
+        ("get", "GET"),
+        ("post", "POST"),
+        ("put", "PUT"),
+        ("patch", "PATCH"),
+        ("delete", "DELETE"),
+    ],
+)
 def test_mock_client_all_methods_record_correct_verb(method_name, expected):
     c = MockClient()
     getattr(c, method_name)("/path")
@@ -81,6 +85,7 @@ def test_mock_client_all_methods_record_correct_verb(method_name, expected):
 
 
 # ── CheckResponse ─────────────────────────────────────────────────────────────
+
 
 def test_check_response_success():
     r = CheckResponse(200, {"content-type": "application/json"}, '{"status":"ok"}')
@@ -131,6 +136,7 @@ def test_check_response_assertion_failure():
 
 
 # ── AllCallsMockClient ────────────────────────────────────────────────────────
+
 
 def test_all_calls_mock_empty():
     c = AllCallsMockClient()

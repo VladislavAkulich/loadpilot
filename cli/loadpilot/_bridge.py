@@ -8,6 +8,7 @@ the real HTTP request via reqwest.
 For tasks that make more than one HTTP call, AllCallsMockClient is used by the
 CLI at plan-build time to detect and flag them as multi_call=True.
 """
+
 from __future__ import annotations
 
 import json as _json

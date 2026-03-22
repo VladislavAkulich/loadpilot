@@ -4,7 +4,6 @@
 /// runs reqwest workers, emits metric snapshots via a channel.
 /// No PyO3 — agents always run in static mode; Python callbacks run
 /// on the coordinator before sharding.
-
 use std::{
     collections::HashMap,
     sync::{
@@ -37,8 +36,12 @@ pub struct TaskPlan {
     pub body_template: Option<String>,
 }
 
-fn default_weight() -> u32 { 1 }
-fn default_method() -> String { "GET".to_string() }
+fn default_weight() -> u32 {
+    1
+}
+fn default_method() -> String {
+    "GET".to_string()
+}
 
 /// Per-VUser pre-auth headers shipped with the plan for distributed mode.
 #[derive(Debug, Clone, Deserialize)]
@@ -50,9 +53,18 @@ pub struct VUserConfig {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum Mode { Constant, Ramp, Step, Spike }
+pub enum Mode {
+    Constant,
+    Ramp,
+    Step,
+    Spike,
+}
 
-impl Default for Mode { fn default() -> Self { Mode::Ramp } }
+impl Default for Mode {
+    fn default() -> Self {
+        Mode::Ramp
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Plan {
@@ -74,7 +86,9 @@ pub struct Plan {
     pub vuser_configs: Vec<VUserConfig>,
 }
 
-fn default_steps() -> u64 { 5 }
+fn default_steps() -> u64 {
+    5
+}
 
 fn compute_target_rps(elapsed_secs: f64, plan: &Plan) -> f64 {
     let rps = plan.rps as f64;
@@ -82,7 +96,11 @@ fn compute_target_rps(elapsed_secs: f64, plan: &Plan) -> f64 {
         Mode::Constant => rps,
         Mode::Ramp => {
             let ramp = plan.ramp_up_secs as f64;
-            if ramp > 0.0 && elapsed_secs < ramp { rps * elapsed_secs / ramp } else { rps }
+            if ramp > 0.0 && elapsed_secs < ramp {
+                rps * elapsed_secs / ramp
+            } else {
+                rps
+            }
         }
         Mode::Step => {
             let steps = plan.steps.max(1) as f64;
@@ -113,7 +131,11 @@ fn total_duration(plan: &Plan) -> Duration {
 fn phase_str(elapsed_secs: f64, plan: &Plan) -> &'static str {
     match plan.mode {
         Mode::Ramp => {
-            if elapsed_secs < plan.ramp_up_secs as f64 { "ramp_up" } else { "steady" }
+            if elapsed_secs < plan.ramp_up_secs as f64 {
+                "ramp_up"
+            } else {
+                "steady"
+            }
         }
         Mode::Spike => {
             let total = plan.duration_secs as f64;
@@ -175,7 +197,9 @@ const MAX_MS: usize = 10_000;
 impl Counters {
     fn new() -> Arc<Self> {
         let mut buckets = Vec::with_capacity(MAX_MS + 1);
-        for _ in 0..=MAX_MS { buckets.push(AtomicU64::new(0)); }
+        for _ in 0..=MAX_MS {
+            buckets.push(AtomicU64::new(0));
+        }
         Arc::new(Self {
             requests_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
@@ -193,48 +217,93 @@ impl Counters {
         self.latency_sum.fetch_add(latency_ms, Ordering::Relaxed);
         self.requests_total.fetch_add(1, Ordering::Relaxed);
         self.window_requests.fetch_add(1, Ordering::Relaxed);
-        if is_error { self.errors_total.fetch_add(1, Ordering::Relaxed); }
+        if is_error {
+            self.errors_total.fetch_add(1, Ordering::Relaxed);
+        }
 
         let mut cur = self.latency_max.load(Ordering::Relaxed);
         while latency_ms > cur {
-            match self.latency_max.compare_exchange_weak(cur, latency_ms, Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => break, Err(v) => cur = v,
+            match self.latency_max.compare_exchange_weak(
+                cur,
+                latency_ms,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(v) => cur = v,
             }
         }
         let mut cur = self.latency_min.load(Ordering::Relaxed);
         while latency_ms < cur {
-            match self.latency_min.compare_exchange_weak(cur, latency_ms, Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => break, Err(v) => cur = v,
+            match self.latency_min.compare_exchange_weak(
+                cur,
+                latency_ms,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(v) => cur = v,
             }
         }
     }
 
     fn percentile(&self, p: f64) -> f64 {
         let total = self.requests_total.load(Ordering::Relaxed);
-        if total == 0 { return 0.0; }
+        if total == 0 {
+            return 0.0;
+        }
         let target = (total as f64 * p).ceil() as u64;
         let mut cum = 0u64;
         for (i, b) in self.latency_buckets.iter().enumerate() {
             cum += b.load(Ordering::Relaxed);
-            if cum >= target { return i as f64; }
+            if cum >= target {
+                return i as f64;
+            }
         }
         MAX_MS as f64
     }
 
-    fn snapshot(&self, elapsed: f64, current_rps: f64, target_rps: f64, phase: &str) -> AgentMetrics {
+    fn snapshot(
+        &self,
+        elapsed: f64,
+        current_rps: f64,
+        target_rps: f64,
+        phase: &str,
+    ) -> AgentMetrics {
         let total = self.requests_total.load(Ordering::Relaxed);
         let mean_ms = if total > 0 {
             self.latency_sum.load(Ordering::Relaxed) as f64 / total as f64
-        } else { 0.0 };
-        let max_ms = { let v = self.latency_max.load(Ordering::Relaxed); if v == 0 { 0.0 } else { v as f64 } };
-        let min_ms = { let v = self.latency_min.load(Ordering::Relaxed); if v == u64::MAX { 0.0 } else { v as f64 } };
+        } else {
+            0.0
+        };
+        let max_ms = {
+            let v = self.latency_max.load(Ordering::Relaxed);
+            if v == 0 {
+                0.0
+            } else {
+                v as f64
+            }
+        };
+        let min_ms = {
+            let v = self.latency_min.load(Ordering::Relaxed);
+            if v == u64::MAX {
+                0.0
+            } else {
+                v as f64
+            }
+        };
 
-        let histogram_buckets: Vec<[u64; 2]> = self.latency_buckets
+        let histogram_buckets: Vec<[u64; 2]> = self
+            .latency_buckets
             .iter()
             .enumerate()
             .filter_map(|(i, b)| {
                 let c = b.load(Ordering::Relaxed);
-                if c > 0 { Some([i as u64, c]) } else { None }
+                if c > 0 {
+                    Some([i as u64, c])
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -251,7 +320,9 @@ impl Counters {
                 p50_ms: self.percentile(0.50),
                 p95_ms: self.percentile(0.95),
                 p99_ms: self.percentile(0.99),
-                max_ms, min_ms, mean_ms,
+                max_ms,
+                min_ms,
+                mean_ms,
             },
             histogram_buckets,
         }
@@ -266,7 +337,9 @@ fn pick_task(tasks: &[TaskPlan], idx: u64) -> &TaskPlan {
     let mut acc = 0u32;
     for t in tasks {
         acc += t.weight;
-        if slot < acc { return t; }
+        if slot < acc {
+            return t;
+        }
     }
     &tasks[0]
 }
@@ -320,7 +393,9 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
         let requests_this_tick = (t_rps * tick_ms as f64 / 1000.0).round() as u64;
 
         for _ in 0..requests_this_tick {
-            if tasks.is_empty() { break; }
+            if tasks.is_empty() {
+                break;
+            }
             let task = pick_task(&tasks, request_idx).clone();
             // Pick per-VUser headers by round-robin through the pre-auth pool.
             let extra_headers: HashMap<String, String> = if pool_size > 0 {
@@ -345,7 +420,7 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
                 let t0 = Instant::now();
                 let mut req = match task.method.as_str() {
                     "POST" => http2.post(&url),
-                    "PUT"  => http2.put(&url),
+                    "PUT" => http2.put(&url),
                     "PATCH" => http2.patch(&url),
                     "DELETE" => http2.delete(&url),
                     _ => http2.get(&url),
@@ -365,9 +440,14 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
                 match req.send().await {
                     Ok(resp) => {
                         let ms = t0.elapsed().as_millis() as u64;
-                        counters2.record(ms, resp.status().is_client_error() || resp.status().is_server_error());
+                        counters2.record(
+                            ms,
+                            resp.status().is_client_error() || resp.status().is_server_error(),
+                        );
                     }
-                    Err(_) => { counters2.record(ms, true); }
+                    Err(_) => {
+                        counters2.record(ms, true);
+                    }
                 }
             });
         }

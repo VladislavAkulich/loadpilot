@@ -1,8 +1,8 @@
 [alias]
-# Run unit tests with line coverage summary (terminal output).
-# Usage: cargo cov
+# Run unit tests with coverage summary.
+# Use instead of `cargo test` to see coverage alongside results.
+# Requires: cargo install cargo-llvm-cov && rustup component add llvm-tools-preview
 cov = "llvm-cov --package coordinator --summary-only"
 
-# Run unit tests with full HTML report → target/llvm-cov/html/index.html
-# Usage: cargo cov-html
+# Full HTML report → target/llvm-cov/html/index.html
 cov-html = "llvm-cov --package coordinator --html --open"

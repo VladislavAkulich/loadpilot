@@ -6,33 +6,89 @@ on:
   pull_request:
 
 jobs:
-  test:
+  # ── Lint & format (Python + Rust) ────────────────────────────────────────────
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v5
 
-      - uses: actions/setup-python@v5
+      - name: Install dependencies
+        working-directory: cli
+        run: uv sync --extra dev
+
+      - name: ruff check (lint)
+        working-directory: cli
+        run: uv run ruff check .
+
+      - name: ruff format (format check)
+        working-directory: cli
+        run: uv run ruff format --check .
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: "3.12"
+          components: clippy, rustfmt
 
-      - name: Install uv
-        run: pip install uv
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
 
-      - name: Run Rust tests
+      - name: cargo fmt
         working-directory: engine
-        run: cargo test --package coordinator
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        working-directory: engine
+        run: cargo clippy --package coordinator -- -D warnings
+
+  # ── Rust: unit tests + coverage ──────────────────────────────────────────────
+  rust:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Test + coverage
+        working-directory: engine
+        run: cargo llvm-cov --package coordinator --summary-only
+
+  # ── Python: integration tests + coverage ─────────────────────────────────────
+  python:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
 
       - name: Build coordinator
         working-directory: engine
-        run: cargo build --release --package coordinator
+        run: cargo build --package coordinator
 
-      - name: Install Python deps
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
         working-directory: cli
         run: uv sync --extra dev
 
       - name: Run tests
         working-directory: cli
-        run: uv run python -m pytest tests/ -v
+        run: uv run pytest tests/ -v

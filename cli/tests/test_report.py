@@ -2,10 +2,8 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
-
-from loadpilot.models import AgentMetrics, LatencyStats
 from loadpilot import report as _report
+from loadpilot.models import AgentMetrics, LatencyStats
 
 
 def _snap(elapsed: float, rps: float, errors: int = 0, phase: str = "steady") -> AgentMetrics:
@@ -18,7 +16,9 @@ def _snap(elapsed: float, rps: float, errors: int = 0, phase: str = "steady") ->
         requests_total=total,
         errors_total=errors,
         active_workers=2,
-        latency=LatencyStats(p50_ms=5.0, p95_ms=15.0, p99_ms=30.0, max_ms=50.0, min_ms=1.0, mean_ms=7.0),
+        latency=LatencyStats(
+            p50_ms=5.0, p95_ms=15.0, p99_ms=30.0, max_ms=50.0, min_ms=1.0, mean_ms=7.0
+        ),
         phase=phase,
     )
 
@@ -33,6 +33,7 @@ SNAPSHOTS = [
 
 
 # ── _fmt_dur ──────────────────────────────────────────────────────────────────
+
 
 def test_fmt_dur_seconds():
     assert _report._fmt_dur(45) == "45s"
@@ -51,6 +52,7 @@ def test_fmt_dur_hours():
 
 
 # ── _build ────────────────────────────────────────────────────────────────────
+
 
 def test_build_returns_html_string():
     html = _report._build(SNAPSHOTS, "MyScenario", "http://localhost", 10, 60, 10)
@@ -94,7 +96,7 @@ def test_build_shows_correct_error_rate():
     html = _report._build(SNAPSHOTS, "S", "http://localhost", 10, 60, 10)
     # final snapshot has errors_total=1, requests_total=50
     # error_rate < 5% → should use "ok" class, not "err"
-    assert 'c-ok' in html
+    assert "c-ok" in html
 
 
 def test_build_shows_error_class_for_high_error_rate():
@@ -113,7 +115,7 @@ def test_build_with_empty_snapshots():
 
 def test_build_contains_latency_values():
     html = _report._build(SNAPSHOTS, "S", "http://localhost", 10, 60, 10)
-    assert ">5<" in html   # p50 = 5ms
+    assert ">5<" in html  # p50 = 5ms
     assert ">30<" in html  # p99 = 30ms
 
 
@@ -124,6 +126,7 @@ def test_build_contains_chartjs_script():
 
 
 # ── generate ─────────────────────────────────────────────────────────────────
+
 
 def test_generate_writes_file():
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -144,6 +147,7 @@ def test_generate_file_is_valid_html():
 
 
 # ── n_agents ──────────────────────────────────────────────────────────────────
+
 
 def test_build_single_agent_no_distributed_badge():
     html = _report._build(SNAPSHOTS, "S", "http://localhost", 10, 60, 10, n_agents=1)

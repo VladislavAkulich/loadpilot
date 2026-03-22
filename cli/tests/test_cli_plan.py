@@ -1,7 +1,5 @@
 """Tests for _build_plan() scenario selection logic."""
 
-from pathlib import Path
-
 import pytest
 
 from loadpilot.cli import _build_plan
@@ -31,6 +29,7 @@ def _register_two():
 
 # ── single scenario ───────────────────────────────────────────────────────────
 
+
 def test_single_scenario_no_name_uses_it(tmp_path):
     @scenario(rps=30)
     class OnlyFlow(VUser):
@@ -44,6 +43,7 @@ def test_single_scenario_no_name_uses_it(tmp_path):
 
 
 # ── multiple scenarios ────────────────────────────────────────────────────────
+
 
 def test_select_by_name_first(tmp_path):
     _register_two()
@@ -81,8 +81,10 @@ def test_no_scenarios_raises_value_error(tmp_path):
 
 # ── distributed mode ──────────────────────────────────────────────────────────
 
+
 def test_static_scenario_distributed_no_pyo3(tmp_path):
     """Static scenario (no on_start) in distributed mode: no PyO3 bridge, no vuser_configs."""
+
     @scenario(rps=10)
     class StaticFlow(VUser):
         @task()
@@ -97,6 +99,7 @@ def test_static_scenario_distributed_no_pyo3(tmp_path):
 
 def test_non_distributed_with_on_start_uses_pyo3(tmp_path):
     """Non-distributed scenario with on_start uses PyO3 bridge."""
+
     @scenario(rps=10)
     class AuthFlow(VUser):
         def on_start(self, client):
@@ -114,6 +117,7 @@ def test_non_distributed_with_on_start_uses_pyo3(tmp_path):
 
 def test_distributed_with_on_start_disables_pyo3(tmp_path):
     """Distributed mode with on_start: PyO3 bridge disabled even if on_start present."""
+
     @scenario(rps=10)
     class AuthFlow(VUser):
         def on_start(self, client):
@@ -133,6 +137,7 @@ def test_distributed_with_on_start_disables_pyo3(tmp_path):
 
 def test_distributed_vuser_configs_empty_when_no_on_start(tmp_path):
     """No on_start → vuser_configs stays empty in distributed mode."""
+
     @scenario(rps=5)
     class SimpleFlow(VUser):
         @task()
@@ -145,8 +150,10 @@ def test_distributed_vuser_configs_empty_when_no_on_start(tmp_path):
 
 # ── n_vusers formula ──────────────────────────────────────────────────────────
 
+
 def test_n_vusers_calculation_minimum(tmp_path):
     """Low-RPS scenarios get the floor of 5 VUsers (min(max(5, rps//100), 100))."""
+
     @scenario(rps=50)
     class LowRpsFlow(VUser):
         def on_start(self, client):
@@ -162,6 +169,7 @@ def test_n_vusers_calculation_minimum(tmp_path):
 
 def test_n_vusers_calculation_mid_rps(tmp_path):
     """Mid-range RPS: n_vusers = rps // 100 when result is between 5 and 100."""
+
     @scenario(rps=1000)
     class MidRpsFlow(VUser):
         def on_start(self, client):
@@ -177,6 +185,7 @@ def test_n_vusers_calculation_mid_rps(tmp_path):
 
 def test_n_vusers_calculation_high_rps(tmp_path):
     """Very high RPS is capped at 100 VUsers."""
+
     @scenario(rps=15000)
     class HighRpsFlow(VUser):
         def on_start(self, client):
@@ -192,8 +201,10 @@ def test_n_vusers_calculation_high_rps(tmp_path):
 
 # ── check_* enables PyO3 ──────────────────────────────────────────────────────
 
+
 def test_check_method_enables_pyo3(tmp_path):
     """A check_{task} method alone (no on_start) is sufficient to enable the PyO3 bridge."""
+
     @scenario(rps=10)
     class CheckOnlyFlow(VUser):
         @task()

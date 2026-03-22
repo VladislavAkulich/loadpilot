@@ -4,6 +4,7 @@ Produces a single self-contained HTML file from the metrics snapshots
 collected during a test run.  No external files are required; charts are
 rendered via Chart.js loaded from a CDN.
 """
+
 from __future__ import annotations
 
 import json
@@ -25,7 +26,16 @@ def generate(
     n_agents: int = 1,
 ) -> None:
     """Build and write the HTML report to *output_path*."""
-    html = _build(snapshots, scenario_name, target_url, rps_target, duration_secs, ramp_up_secs, thresholds or {}, n_agents)
+    html = _build(
+        snapshots,
+        scenario_name,
+        target_url,
+        rps_target,
+        duration_secs,
+        ramp_up_secs,
+        thresholds or {},
+        n_agents,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
 
@@ -33,10 +43,10 @@ def generate(
 # ── Internal builder ──────────────────────────────────────────────────────────
 
 _THRESHOLD_LABELS: dict[str, str] = {
-    "p50_ms":     "p50 latency",
-    "p95_ms":     "p95 latency",
-    "p99_ms":     "p99 latency",
-    "max_ms":     "max latency",
+    "p50_ms": "p50 latency",
+    "p95_ms": "p95 latency",
+    "p99_ms": "p99 latency",
+    "max_ms": "max latency",
     "error_rate": "error rate",
 }
 
@@ -64,42 +74,44 @@ def _build(
     lat = final.latency if final else None
 
     # ── Time-series data for charts ───────────────────────────────────────────
-    elapsed       = [round(s.elapsed_secs, 2) for s in chart_snaps]
-    actual_rps    = [round(s.current_rps, 2) for s in chart_snaps]
+    elapsed = [round(s.elapsed_secs, 2) for s in chart_snaps]
+    actual_rps = [round(s.current_rps, 2) for s in chart_snaps]
     target_rps_ts = [round(s.target_rps, 2) for s in chart_snaps]
-    p50_ts        = [round(s.latency.p50_ms, 2) for s in chart_snaps]
-    p95_ts        = [round(s.latency.p95_ms, 2) for s in chart_snaps]
-    p99_ts        = [round(s.latency.p99_ms, 2) for s in chart_snaps]
+    p50_ts = [round(s.latency.p50_ms, 2) for s in chart_snaps]
+    p95_ts = [round(s.latency.p95_ms, 2) for s in chart_snaps]
+    p99_ts = [round(s.latency.p99_ms, 2) for s in chart_snaps]
 
-    chart_data = json.dumps({
-        "elapsed": elapsed,
-        "actual_rps": actual_rps,
-        "target_rps": target_rps_ts,
-        "p50": p50_ts,
-        "p95": p95_ts,
-        "p99": p99_ts,
-    })
+    chart_data = json.dumps(
+        {
+            "elapsed": elapsed,
+            "actual_rps": actual_rps,
+            "target_rps": target_rps_ts,
+            "p50": p50_ts,
+            "p95": p95_ts,
+            "p99": p99_ts,
+        }
+    )
 
     # ── Derived display values ────────────────────────────────────────────────
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     dur_str = _fmt_dur(int(actual_duration))
     err_class = "err" if error_rate >= 5 else ("warn" if error_rate > 0 else "ok")
 
-    lat_p50  = f"{lat.p50_ms:.0f}" if lat else "—"
-    lat_p95  = f"{lat.p95_ms:.0f}" if lat else "—"
-    lat_p99  = f"{lat.p99_ms:.0f}" if lat else "—"
-    lat_max  = f"{lat.max_ms:.0f}" if lat else "—"
-    lat_min  = f"{lat.min_ms:.0f}" if lat else "—"
+    lat_p50 = f"{lat.p50_ms:.0f}" if lat else "—"
+    lat_p95 = f"{lat.p95_ms:.0f}" if lat else "—"
+    lat_p99 = f"{lat.p99_ms:.0f}" if lat else "—"
+    lat_max = f"{lat.max_ms:.0f}" if lat else "—"
+    lat_min = f"{lat.min_ms:.0f}" if lat else "—"
     lat_mean = f"{lat.mean_ms:.1f}" if lat else "—"
 
     # ── Threshold rows ─────────────────────────────────────────────────────────
     thresholds_html = ""
     if thresholds:
         actual_vals: dict[str, float] = {
-            "p50_ms":     lat.p50_ms if lat else 0.0,
-            "p95_ms":     lat.p95_ms if lat else 0.0,
-            "p99_ms":     lat.p99_ms if lat else 0.0,
-            "max_ms":     lat.max_ms if lat else 0.0,
+            "p50_ms": lat.p50_ms if lat else 0.0,
+            "p95_ms": lat.p95_ms if lat else 0.0,
+            "p99_ms": lat.p99_ms if lat else 0.0,
+            "max_ms": lat.max_ms if lat else 0.0,
             "error_rate": error_rate,
         }
         rows = []
@@ -119,15 +131,15 @@ def _build(
                 f'<td class="thr-actual">{value:.1f}{unit}</td>'
                 f'<td class="thr-sep">&lt;</td>'
                 f'<td class="thr-limit">{limit:.1f}{unit}</td>'
-                f'</tr>'
+                f"</tr>"
             )
         if rows:
             thresholds_html = (
-                '\n  <!-- Thresholds -->\n'
+                "\n  <!-- Thresholds -->\n"
                 '  <div class="section">\n'
                 '    <div class="section-title">SLA Thresholds</div>\n'
                 '    <table class="thr-table">\n'
-                '      <tbody>\n'
+                "      <tbody>\n"
                 + "\n".join(f"        {r}" for r in rows)
                 + "\n      </tbody>\n    </table>\n  </div>"
             )
@@ -245,7 +257,7 @@ def _build(
     </div>
     <div class="meta">
       <div><b>Target</b> {target_url}</div>
-      {'<div><b>Mode</b> <span style="color:var(--primary);font-weight:700;">distributed &times; ' + str(n_agents) + ' agents</span></div>' if n_agents > 1 else ''}
+      {'<div><b>Mode</b> <span style="color:var(--primary);font-weight:700;">distributed &times; ' + str(n_agents) + " agents</span></div>" if n_agents > 1 else ""}
       <div><b>Generated</b> {ts}</div>
     </div>
   </header>

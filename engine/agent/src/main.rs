@@ -6,7 +6,6 @@
 ///
 /// Usage:
 ///   agent --coordinator <host:port> --agent-id <id>
-
 mod nats;
 mod runner;
 
@@ -68,11 +67,17 @@ async fn main() -> Result<()> {
     loop {
         match run_once(&args).await {
             Ok(()) => {
-                eprintln!("[agent {}] run complete — reconnecting in 2s...", args.agent_id);
+                eprintln!(
+                    "[agent {}] run complete — reconnecting in 2s...",
+                    args.agent_id
+                );
                 sleep(Duration::from_secs(2)).await;
             }
             Err(e) => {
-                eprintln!("[agent {}] error: {e} — reconnecting in 5s...", args.agent_id);
+                eprintln!(
+                    "[agent {}] error: {e} — reconnecting in 5s...",
+                    args.agent_id
+                );
                 sleep(Duration::from_secs(5)).await;
             }
         }
@@ -89,23 +94,34 @@ async fn run_once(args: &Args) -> Result<()> {
     nats.subscribe("loadpilot.control", "ctrl").await?;
 
     // Announce to coordinator.
-    let reg = serde_json::to_string(&RegisterMsg { agent_id: args.agent_id.clone() })?;
+    let reg = serde_json::to_string(&RegisterMsg {
+        agent_id: args.agent_id.clone(),
+    })?;
     nats.publish("loadpilot.register", reg.as_bytes()).await?;
 
-    eprintln!("[agent {}] registered — waiting for plan shard...", args.agent_id);
+    eprintln!(
+        "[agent {}] registered — waiting for plan shard...",
+        args.agent_id
+    );
 
     // Wait for shard plan or stop signal.
     let msg: ShardMsg = loop {
         let (subject, payload) = nats.next_message().await?;
         if subject == shard_subject {
             let msg: ShardMsg = serde_json::from_slice(&payload)?;
-            eprintln!("[agent {}] received shard ({} RPS)", args.agent_id, msg.plan.rps);
+            eprintln!(
+                "[agent {}] received shard ({} RPS)",
+                args.agent_id, msg.plan.rps
+            );
             break msg;
         }
         if subject == "loadpilot.control" {
             if let Ok(ctrl) = serde_json::from_slice::<ControlMsg>(&payload) {
                 if ctrl.command == "stop" {
-                    eprintln!("[agent {}] received stop before shard — will retry", args.agent_id);
+                    eprintln!(
+                        "[agent {}] received stop before shard — will retry",
+                        args.agent_id
+                    );
                     return Ok(());
                 }
             }
@@ -120,7 +136,10 @@ async fn run_once(args: &Args) -> Result<()> {
             .as_millis() as u64;
         if msg.start_at_unix_ms > now_ms {
             let wait_ms = msg.start_at_unix_ms - now_ms;
-            eprintln!("[agent {}] waiting {wait_ms}ms for synchronised start...", args.agent_id);
+            eprintln!(
+                "[agent {}] waiting {wait_ms}ms for synchronised start...",
+                args.agent_id
+            );
             sleep(Duration::from_millis(wait_ms)).await;
         }
     }

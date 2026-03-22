@@ -2,6 +2,7 @@
 name = "loadpilot"
 version = "0.1.0"
 requires-python = ">=3.12"
+license = { text = "MIT" }
 dependencies = [
     "typer",
     "httpx",
@@ -16,6 +17,7 @@ dev = [
     "anyio[trio]",
     "pytest-cov>=5",
     "coverage>=7",
+    "ruff>=0.9",
 ]
 
 [project.scripts]
@@ -47,4 +49,8 @@ omit = ["tests/*"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]   # pycodestyle errors, pyflakes, isort
+ignore = ["E501"]           # line-length is checked by formatter, not linter
 

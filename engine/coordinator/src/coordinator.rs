@@ -21,7 +21,7 @@ use tokio::time::sleep;
 
 use std::sync::RwLock;
 
-use crate::metrics::{Metrics, LatencySnapshot};
+use crate::metrics::{LatencySnapshot, Metrics};
 use crate::plan::{Mode, ScenarioPlan, TaskPlan};
 use crate::python_bridge::PythonBridge;
 
@@ -50,7 +50,6 @@ pub struct MetricsSnapshot {
     pub latency: LatencySnapshot,
     pub phase: Phase,
 }
-
 
 pub struct Coordinator {
     plan: ScenarioPlan,
@@ -84,7 +83,7 @@ impl Coordinator {
         // Little's Law: concurrency = RPS × expected_latency.
         // We budget 200ms of in-flight tolerance, capped at 2000 to prevent
         // connection storms at high RPS targets.
-        let max_concurrency = ((plan.rps as f64 * 0.2) as usize).max(50).min(2000);
+        let max_concurrency = ((plan.rps as f64 * 0.2) as usize).clamp(50, 2000);
         let sem = Arc::new(Semaphore::new(max_concurrency));
 
         let http_client = reqwest::Client::builder()
@@ -98,13 +97,23 @@ impl Coordinator {
         let bridge: Option<Arc<PythonBridge>> =
             if let (Some(sf), Some(sc)) = (&plan.scenario_file, &plan.scenario_class) {
                 let n = plan.n_vusers.unwrap_or(5) as usize;
-                match PythonBridge::new(sf, sc, n, &plan.target_url, http_client.clone(), tokio::runtime::Handle::current()) {
+                match PythonBridge::new(
+                    sf,
+                    sc,
+                    n,
+                    &plan.target_url,
+                    http_client.clone(),
+                    tokio::runtime::Handle::current(),
+                ) {
                     Ok(b) => {
                         eprintln!("[loadpilot] PyO3 bridge ready ({} VUsers)", n);
                         Some(Arc::new(b))
                     }
                     Err(e) => {
-                        eprintln!("[loadpilot] PyO3 bridge init failed: {} — using static URLs", e);
+                        eprintln!(
+                            "[loadpilot] PyO3 bridge init failed: {} — using static URLs",
+                            e
+                        );
                         None
                     }
                 }
@@ -265,7 +274,10 @@ impl Coordinator {
                                 } else {
                                     for cr in calls {
                                         if let Some(ref err) = cr.error {
-                                            eprintln!("[loadpilot] task error ({}): {}", task_name, err);
+                                            eprintln!(
+                                                "[loadpilot] task error ({}): {}",
+                                                task_name, err
+                                            );
                                         }
                                         if cr.success {
                                             metrics_task.record_success(cr.elapsed_ms);
@@ -285,8 +297,7 @@ impl Coordinator {
                 } else {
                     // Static path: URL / method come directly from the plan.
                     let client = http_client.clone();
-                    let url =
-                        format!("{}{}", plan.target_url.trim_end_matches('/'), t.url);
+                    let url = format!("{}{}", plan.target_url.trim_end_matches('/'), t.url);
                     let method = t.method.clone();
                     let headers = t.headers.clone();
                     let body = t.body_template.clone();
@@ -403,7 +414,7 @@ fn compute_phase_and_rps(elapsed_secs: f64, plan: &ScenarioPlan) -> (Phase, f64)
     }
 }
 
-fn pick_task<'a>(tasks: &'a [TaskPlan], index: usize) -> &'a TaskPlan {
+fn pick_task(tasks: &[TaskPlan], index: usize) -> &TaskPlan {
     if tasks.is_empty() {
         panic!("No tasks in plan");
     }
@@ -452,7 +463,9 @@ async fn execute_request(
     }
 
     if let Some(b) = body {
-        req = req.header("Content-Type", "application/json").body(b.to_string());
+        req = req
+            .header("Content-Type", "application/json")
+            .body(b.to_string());
     }
 
     let resp = req.send().await?;
@@ -464,7 +477,11 @@ async fn execute_request(
         .collect();
     // Body intentionally not read in static mode — no check_* method runs here,
     // so allocating the response body on every request is unnecessary overhead.
-    Ok(HttpResponse { status, headers: resp_headers, body: String::new() })
+    Ok(HttpResponse {
+        status,
+        headers: resp_headers,
+        body: String::new(),
+    })
 }
 
 #[cfg(test)]
@@ -486,12 +503,26 @@ mod tests {
 
     // ── compute_phase_and_rps ─────────────────────────────────────────────────
 
-    fn plan_for_mode(mode: Mode, rps: u64, duration: u64, ramp_up: u64, steps: u64) -> ScenarioPlan {
+    fn plan_for_mode(
+        mode: Mode,
+        rps: u64,
+        duration: u64,
+        ramp_up: u64,
+        steps: u64,
+    ) -> ScenarioPlan {
         ScenarioPlan {
-            name: "T".into(), rps, duration_secs: duration, ramp_up_secs: ramp_up,
-            mode, target_url: "http://localhost".into(),
-            tasks: vec![], scenario_file: None, scenario_class: None, n_vusers: None,
-            vuser_configs: vec![], steps,
+            name: "T".into(),
+            rps,
+            duration_secs: duration,
+            ramp_up_secs: ramp_up,
+            mode,
+            target_url: "http://localhost".into(),
+            tasks: vec![],
+            scenario_file: None,
+            scenario_class: None,
+            n_vusers: None,
+            vuser_configs: vec![],
+            steps,
         }
     }
 

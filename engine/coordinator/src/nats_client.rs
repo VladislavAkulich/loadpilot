@@ -1,7 +1,6 @@
 /// Minimal NATS 1.x client over raw TCP.
 /// Implements exactly the subset our agent needs: CONNECT, SUB, PUB, PING/PONG.
 /// Compatible with the embedded broker in coordinator/src/broker.rs.
-
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -32,7 +31,10 @@ impl NatsClient {
         write_half.write_all(connect).await?;
         write_half.write_all(b"PING\r\n").await?;
 
-        Ok(Self { writer: write_half, msg_rx })
+        Ok(Self {
+            writer: write_half,
+            msg_rx,
+        })
     }
 
     /// Subscribe to `subject` with a given `sid` (subscription ID).
@@ -53,7 +55,10 @@ impl NatsClient {
 
     /// Wait for the next inbound message. Returns `(subject, payload)`.
     pub async fn next_message(&mut self) -> Result<(String, Vec<u8>)> {
-        self.msg_rx.recv().await.ok_or_else(|| anyhow::anyhow!("NATS connection closed"))
+        self.msg_rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("NATS connection closed"))
     }
 }
 
@@ -77,7 +82,9 @@ async fn read_loop(
         if upper.starts_with("MSG") {
             // MSG <subject> <sid> <bytes>
             let parts: Vec<&str> = line.trim().splitn(4, ' ').collect();
-            if parts.len() < 4 { continue; }
+            if parts.len() < 4 {
+                continue;
+            }
             let subject = parts[1].to_string();
             let payload_len: usize = parts[3].parse().unwrap_or(0);
 

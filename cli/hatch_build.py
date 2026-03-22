@@ -8,10 +8,10 @@ During `pip install` from source (or `hatch build` in CI) this hook:
 When installing a pre-built wheel from PyPI the hook is NOT invoked — the binary
 is already present inside the wheel (baked in by CI).
 """
+
 from __future__ import annotations
 
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -43,9 +43,7 @@ class CustomBuildHook(BuildHookInterface):
         # In CI the binary may already be built and copied by the workflow.
         # Skip compilation if it's already there and SKIP_CARGO env var is set.
         if dst.exists() and os.environ.get("LOADPILOT_SKIP_CARGO"):
-            self.app.display_info(
-                f"[loadpilot] Skipping cargo build — {dst} already exists."
-            )
+            self.app.display_info(f"[loadpilot] Skipping cargo build — {dst} already exists.")
         else:
             self.app.display_info("[loadpilot] Building Rust coordinator (cargo build --release)…")
             env = os.environ.copy()

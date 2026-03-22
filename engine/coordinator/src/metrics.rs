@@ -1,4 +1,4 @@
-/// In-memory latency histogram, request counters, and shared snapshot types.
+//! In-memory latency histogram, request counters, and shared snapshot types.
 
 /// Serializable latency snapshot sent in metric reports.
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, Default)]
@@ -110,12 +110,20 @@ impl LatencyHistogram {
 
     pub fn max_ms(&self) -> f64 {
         let v = self.max_ms.load(Ordering::Relaxed);
-        if v == 0 { 0.0 } else { v as f64 }
+        if v == 0 {
+            0.0
+        } else {
+            v as f64
+        }
     }
 
     pub fn min_ms(&self) -> f64 {
         let v = self.min_ms.load(Ordering::Relaxed);
-        if v == u64::MAX { 0.0 } else { v as f64 }
+        if v == u64::MAX {
+            0.0
+        } else {
+            v as f64
+        }
     }
 }
 

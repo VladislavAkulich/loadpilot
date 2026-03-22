@@ -1,8 +1,7 @@
-import asyncio
 import functools
 import inspect
 from dataclasses import dataclass, field
-from typing import Callable, Any
+from typing import Any, Callable
 
 _scenarios: list["ScenarioDef"] = []
 
@@ -109,10 +108,12 @@ def task(_func=None, *, weight: int = 1):
 
     def decorator(func):
         if inspect.iscoroutinefunction(func):
+
             @functools.wraps(func)
             async def wrapper(*args, **kwargs):  # type: ignore[misc]
                 return await func(*args, **kwargs)
         else:
+
             @functools.wraps(func)
             def wrapper(*args, **kwargs):
                 return func(*args, **kwargs)

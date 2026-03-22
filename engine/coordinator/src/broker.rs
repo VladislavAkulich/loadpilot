@@ -1,3 +1,4 @@
+use anyhow::Result;
 /// Minimal embedded NATS-compatible broker.
 ///
 /// Implements a subset of the NATS 1.x wire protocol sufficient for
@@ -7,9 +8,7 @@
 ///
 /// The coordinator also publishes/subscribes directly via `BrokerHandle`
 /// without going through TCP (no round-trip for local messages).
-
 use std::sync::Arc;
-use anyhow::Result;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -26,8 +25,14 @@ pub fn subject_matches(pattern: &str, subject: &str) -> bool {
     loop {
         match (pp.get(pi), sp.get(si)) {
             (Some(&">"), _) => return true,
-            (Some(&"*"), Some(_)) => { pi += 1; si += 1; }
-            (Some(p), Some(s)) if p == s => { pi += 1; si += 1; }
+            (Some(&"*"), Some(_)) => {
+                pi += 1;
+                si += 1;
+            }
+            (Some(p), Some(s)) if p == s => {
+                pi += 1;
+                si += 1;
+            }
             (None, None) => return true,
             _ => return false,
         }
@@ -58,7 +63,13 @@ impl State {
         self.next_id
     }
 
-    fn subscribe_tcp(&mut self, pattern: String, cid: ClientId, sid: String, tx: mpsc::UnboundedSender<Vec<u8>>) {
+    fn subscribe_tcp(
+        &mut self,
+        pattern: String,
+        cid: ClientId,
+        sid: String,
+        tx: mpsc::UnboundedSender<Vec<u8>>,
+    ) {
         self.tcp_subs.push((pattern, cid, Sub { sid, tx }));
     }
 
@@ -67,7 +78,8 @@ impl State {
     }
 
     fn unsubscribe(&mut self, cid: ClientId, sid: &str) {
-        self.tcp_subs.retain(|(_, c, s)| !(*c == cid && s.sid == sid));
+        self.tcp_subs
+            .retain(|(_, c, s)| !(*c == cid && s.sid == sid));
     }
 
     fn disconnect(&mut self, cid: ClientId) {
@@ -115,7 +127,10 @@ pub async fn start(addr: &str) -> Result<BrokerHandle> {
                     let b = broker.0.clone();
                     tokio::spawn(handle_client(stream, b));
                 }
-                Err(e) => { eprintln!("[broker] accept error: {e}"); break; }
+                Err(e) => {
+                    eprintln!("[broker] accept error: {e}");
+                    break;
+                }
             }
         }
     });
@@ -131,7 +146,11 @@ pub async fn publish(handle: &BrokerHandle, subject: &str, payload: &[u8]) {
 /// Subscribe from the coordinator process. Returns a channel of raw payloads.
 pub async fn subscribe(handle: &BrokerHandle, pattern: &str) -> mpsc::UnboundedReceiver<Vec<u8>> {
     let (tx, rx) = mpsc::unbounded_channel();
-    handle.0.lock().await.subscribe_internal(pattern.to_string(), tx);
+    handle
+        .0
+        .lock()
+        .await
+        .subscribe_internal(pattern.to_string(), tx);
     rx
 }
 
@@ -178,7 +197,10 @@ async fn handle_client(stream: TcpStream, state: Arc<Mutex<State>>) {
             if parts.len() >= 3 {
                 let subject = parts[1].to_string();
                 let sid = parts[parts.len() - 1].to_string();
-                state.lock().await.subscribe_tcp(subject, cid, sid, tx.clone());
+                state
+                    .lock()
+                    .await
+                    .subscribe_tcp(subject, cid, sid, tx.clone());
             }
         } else if cmd.starts_with("UNSUB") {
             // UNSUB <sid> [max-msgs]
@@ -189,7 +211,9 @@ async fn handle_client(stream: TcpStream, state: Arc<Mutex<State>>) {
         } else if cmd.starts_with("PUB") {
             // PUB <subject> <#bytes>\r\n<payload>\r\n
             let parts: Vec<&str> = line.trim().splitn(3, ' ').collect();
-            if parts.len() < 3 { continue; }
+            if parts.len() < 3 {
+                continue;
+            }
             let subject = parts[1].to_string();
             let payload_len: usize = parts[2].parse().unwrap_or(0);
 
@@ -229,7 +253,10 @@ mod tests {
     #[test]
     fn wildcard_gt() {
         assert!(subject_matches("a.>", "a.b.c.d"));
-        assert!(subject_matches("loadpilot.metrics.>", "loadpilot.metrics.run1.agent0"));
+        assert!(subject_matches(
+            "loadpilot.metrics.>",
+            "loadpilot.metrics.run1.agent0"
+        ));
         assert!(!subject_matches("a.>", "b.c"));
     }
 }

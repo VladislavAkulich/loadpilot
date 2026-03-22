@@ -16,13 +16,12 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import textwrap
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-
-import sys
 
 import pytest
 
@@ -60,6 +59,7 @@ _PYTHONPATH = f"{_CLI_ROOT}{os.pathsep}{_SITE_PACKAGES}"
 
 
 # ── Mock HTTP server ──────────────────────────────────────────────────────────
+
 
 class _Handler(BaseHTTPRequestHandler):
     """Returns 200 JSON for any path except /fail (→ 404) and /error (→ 500)."""
@@ -114,6 +114,7 @@ class MockServer:
 
 # ── Coordinator runner ────────────────────────────────────────────────────────
 
+
 def _run(plan: ScenarioPlan, timeout: int = 30) -> list[AgentMetrics]:
     """Spawn coordinator, feed plan JSON via stdin, return all parsed metrics."""
     binary = _find_coordinator()
@@ -156,6 +157,7 @@ def _static_plan(url: str, path: str = "/ping", **kwargs) -> ScenarioPlan:
 
 
 # ── Static mode tests ─────────────────────────────────────────────────────────
+
 
 @requires_coordinator
 def test_static_completes_with_done_phase():
@@ -206,8 +208,13 @@ def test_static_metrics_json_protocol():
         env = {**os.environ, "PYTHONPATH": _PYTHONPATH}
         plan = _static_plan(srv.url)
         proc = subprocess.Popen(
-            [str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, bufsize=1, env=env,
+            [str(binary)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=env,
         )
         stdout, _ = proc.communicate(input=plan.model_dump_json() + "\n", timeout=30)
 
@@ -261,6 +268,7 @@ def test_static_latency_non_negative():
 
 
 # ── PyO3 mode tests ───────────────────────────────────────────────────────────
+
 
 def _write_scenario(content: str) -> str:
     """Write a scenario .py to a temp file and return the path."""
@@ -430,6 +438,7 @@ def test_pyo3_no_check_method_uses_status_code():
 
 # ── Additional static tests ───────────────────────────────────────────────────
 
+
 @requires_coordinator
 def test_static_errors_counted_on_500():
     """HTTP 5xx responses must be counted as errors in static mode."""
@@ -479,6 +488,7 @@ def test_static_done_phase_only_at_end():
 
 
 # ── Additional PyO3 tests ─────────────────────────────────────────────────────
+
 
 @requires_coordinator
 def test_pyo3_task_exception_counted_as_error():

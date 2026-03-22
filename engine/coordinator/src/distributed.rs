@@ -4,7 +4,6 @@
 ///   run()                — embedded NATS broker + N spawned local agents  (original)
 ///   run_external_agents()— embedded NATS broker, wait for agents to connect externally
 ///   run_with_nats_url()  — connect to external NATS, wait for remote agents (Railway etc.)
-
 use std::{path::PathBuf, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result};
@@ -23,10 +22,18 @@ use crate::{
 
 // ── NATS subjects ─────────────────────────────────────────────────────────────
 
-fn subject_register() -> &'static str { "loadpilot.register" }
-fn subject_shard(agent_id: &str) -> String { format!("loadpilot.shard.{agent_id}") }
-fn subject_metrics() -> &'static str { "loadpilot.metrics.>" }
-fn subject_control() -> &'static str { "loadpilot.control" }
+fn subject_register() -> &'static str {
+    "loadpilot.register"
+}
+fn subject_shard(agent_id: &str) -> String {
+    format!("loadpilot.shard.{agent_id}")
+}
+fn subject_metrics() -> &'static str {
+    "loadpilot.metrics.>"
+}
+fn subject_control() -> &'static str {
+    "loadpilot.control"
+}
 
 // ── Wire messages ─────────────────────────────────────────────────────────────
 
@@ -83,12 +90,16 @@ struct AggregatedSnapshot {
 const MAX_BUCKET: usize = 10_000;
 
 fn percentile_from_merged(buckets: &[u64; MAX_BUCKET + 1], total: u64, p: f64) -> f64 {
-    if total == 0 { return 0.0; }
+    if total == 0 {
+        return 0.0;
+    }
     let target = (total as f64 * p).ceil() as u64;
     let mut cum = 0u64;
     for (i, &count) in buckets.iter().enumerate() {
         cum += count;
-        if cum >= target { return i as f64; }
+        if cum >= target {
+            return i as f64;
+        }
     }
     MAX_BUCKET as f64
 }
@@ -101,14 +112,22 @@ fn aggregate(snapshots: &[AgentMetricsMsg]) -> AggregatedSnapshot {
 
     if snapshots.is_empty() {
         return AggregatedSnapshot {
-            timestamp_secs: now, elapsed_secs: 0.0, current_rps: 0.0, target_rps: 0.0,
-            requests_total: 0, errors_total: 0, active_workers: 0,
+            timestamp_secs: now,
+            elapsed_secs: 0.0,
+            current_rps: 0.0,
+            target_rps: 0.0,
+            requests_total: 0,
+            errors_total: 0,
+            active_workers: 0,
             phase: "ramp_up".to_string(),
             latency: LatencySnapshot::default(),
         };
     }
 
-    let elapsed = snapshots.iter().map(|s| s.elapsed_secs).fold(0.0_f64, f64::max);
+    let elapsed = snapshots
+        .iter()
+        .map(|s| s.elapsed_secs)
+        .fold(0.0_f64, f64::max);
     let current_rps: f64 = snapshots.iter().map(|s| s.current_rps).sum();
     let target_rps: f64 = snapshots.iter().map(|s| s.target_rps).sum();
     let requests_total: u64 = snapshots.iter().map(|s| s.requests_total).sum();
@@ -120,9 +139,12 @@ fn aggregate(snapshots: &[AgentMetricsMsg]) -> AggregatedSnapshot {
     } else {
         // Exclude "done" agents — overall phase is only "done" when ALL are done.
         let priority = |p: &str| match p {
-            "steady" => 2, "ramp_down" => 3, _ => 1,
+            "steady" => 2,
+            "ramp_down" => 3,
+            _ => 1,
         };
-        snapshots.iter()
+        snapshots
+            .iter()
             .filter(|s| s.phase != "done")
             .max_by_key(|s| priority(s.phase.as_str()))
             .map(|s| s.phase.clone())
@@ -130,11 +152,19 @@ fn aggregate(snapshots: &[AgentMetricsMsg]) -> AggregatedSnapshot {
     };
 
     let total_req = requests_total.max(1) as f64;
-    let mean_ms = snapshots.iter()
+    let mean_ms = snapshots
+        .iter()
         .map(|s| s.latency.mean_ms * s.requests_total as f64)
-        .sum::<f64>() / total_req;
-    let max_ms = snapshots.iter().map(|s| s.latency.max_ms).fold(0.0_f64, f64::max);
-    let min_ms = snapshots.iter().map(|s| s.latency.min_ms).fold(f64::MAX, f64::min);
+        .sum::<f64>()
+        / total_req;
+    let max_ms = snapshots
+        .iter()
+        .map(|s| s.latency.max_ms)
+        .fold(0.0_f64, f64::max);
+    let min_ms = snapshots
+        .iter()
+        .map(|s| s.latency.min_ms)
+        .fold(f64::MAX, f64::min);
 
     // Merge histograms for exact percentiles.
     // Fall back to simple average only if no agent sent histogram data.
@@ -171,7 +201,14 @@ fn aggregate(snapshots: &[AgentMetricsMsg]) -> AggregatedSnapshot {
         errors_total,
         active_workers,
         phase,
-        latency: LatencySnapshot { p50_ms, p95_ms, p99_ms, max_ms, min_ms, mean_ms },
+        latency: LatencySnapshot {
+            p50_ms,
+            p95_ms,
+            p99_ms,
+            max_ms,
+            min_ms,
+            mean_ms,
+        },
     }
 }
 
@@ -179,14 +216,27 @@ fn aggregate(snapshots: &[AgentMetricsMsg]) -> AggregatedSnapshot {
 
 fn shard(plan: &ScenarioPlan, n: usize, idx: usize) -> ScenarioPlan {
     let base_rps = plan.rps / n as u64;
-    let rps = if idx == n - 1 { plan.rps - base_rps * (n - 1) as u64 } else { base_rps };
+    let rps = if idx == n - 1 {
+        plan.rps - base_rps * (n - 1) as u64
+    } else {
+        base_rps
+    };
 
     let n_vusers = plan.n_vusers.map(|v| {
         let base = v / n as u64;
-        if idx == n - 1 { v - base * (n - 1) as u64 } else { base }.max(1)
+        if idx == n - 1 {
+            v - base * (n - 1) as u64
+        } else {
+            base
+        }
+        .max(1)
     });
 
-    ScenarioPlan { rps, n_vusers, ..plan.clone() }
+    ScenarioPlan {
+        rps,
+        n_vusers,
+        ..plan.clone()
+    }
 }
 
 // ── Agent binary discovery ────────────────────────────────────────────────────
@@ -197,12 +247,16 @@ fn agent_binary() -> Result<PathBuf> {
 
     if let Ok(exe) = std::env::current_exe() {
         let candidate = exe.with_file_name(&name);
-        if candidate.exists() { return Ok(candidate); }
+        if candidate.exists() {
+            return Ok(candidate);
+        }
     }
 
     for profile in ["release", "debug"] {
         let candidate = PathBuf::from(format!("target/{profile}/{name}"));
-        if candidate.exists() { return Ok(candidate); }
+        if candidate.exists() {
+            return Ok(candidate);
+        }
     }
 
     anyhow::bail!(
@@ -223,7 +277,8 @@ async fn run_with_embedded_broker(
     spawn: bool,
 ) -> Result<()> {
     eprintln!("[distributed] starting embedded broker on {broker_addr}");
-    let broker = broker::start(broker_addr).await
+    let broker = broker::start(broker_addr)
+        .await
         .with_context(|| format!("Failed to start embedded broker on {broker_addr}"))?;
 
     let mut reg_rx = broker::subscribe(&broker, subject_register()).await;
@@ -233,13 +288,18 @@ async fn run_with_embedded_broker(
 
     if spawn {
         let agent_bin = agent_binary()?;
-        eprintln!("[distributed] spawning {n_agents} agents using {}", agent_bin.display());
+        eprintln!(
+            "[distributed] spawning {n_agents} agents using {}",
+            agent_bin.display()
+        );
         let run_id = uuid::Uuid::new_v4().to_string();
 
         for i in 0..n_agents {
             let child = Command::new(&agent_bin)
-                .arg("--coordinator").arg(broker_addr)
-                .arg("--agent-id").arg(format!("agent-{i}"))
+                .arg("--coordinator")
+                .arg(broker_addr)
+                .arg("--agent-id")
+                .arg(format!("agent-{i}"))
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::inherit())
@@ -266,25 +326,37 @@ async fn run_with_embedded_broker(
                 }
             }
         }
-    }).await.context("Timed out waiting for agents to register")?;
+    })
+    .await
+    .context("Timed out waiting for agents to register")?;
 
     // All agents start at the same wall-clock time to eliminate clock skew.
     let start_at_unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64 + 2_000;
+        .as_millis() as u64
+        + 2_000;
 
     for (idx, agent_id) in registered.iter().enumerate() {
         let shard_plan = shard(&plan, n_agents, idx);
-        let msg = ShardMsg { agent_id: agent_id.clone(), plan: shard_plan, start_at_unix_ms };
+        let msg = ShardMsg {
+            agent_id: agent_id.clone(),
+            plan: shard_plan,
+            start_at_unix_ms,
+        };
         let payload = serde_json::to_vec(&msg)?;
         broker::publish(&broker, &subject_shard(agent_id), &payload).await;
-        eprintln!("[distributed] sent plan shard to {agent_id} ({} RPS, start_at +2s)", msg.plan.rps);
+        eprintln!(
+            "[distributed] sent plan shard to {agent_id} ({} RPS, start_at +2s)",
+            msg.plan.rps
+        );
     }
 
     aggregate_loop(&mut metrics_rx, n_agents, &shared_snapshot).await?;
 
-    let stop = serde_json::to_vec(&ControlMsg { command: "stop".to_string() })?;
+    let stop = serde_json::to_vec(&ControlMsg {
+        command: "stop".to_string(),
+    })?;
     broker::publish(&broker, subject_control(), &stop).await;
 
     sleep(Duration::from_millis(500)).await;
@@ -388,13 +460,23 @@ async fn aggregate_loop(
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Embedded broker + N spawned local agent processes. Original mode.
-pub async fn run(plan: ScenarioPlan, n_agents: usize, broker_addr: &str, shared_snapshot: SharedSnapshot) -> Result<()> {
+pub async fn run(
+    plan: ScenarioPlan,
+    n_agents: usize,
+    broker_addr: &str,
+    shared_snapshot: SharedSnapshot,
+) -> Result<()> {
     run_with_embedded_broker(plan, n_agents, broker_addr, shared_snapshot, true).await
 }
 
 /// Embedded broker + wait for N externally started agents (no spawning).
 /// Useful for local testing without Railway: run coordinator, then start agents manually.
-pub async fn run_external_agents(plan: ScenarioPlan, n_agents: usize, broker_addr: &str, shared_snapshot: SharedSnapshot) -> Result<()> {
+pub async fn run_external_agents(
+    plan: ScenarioPlan,
+    n_agents: usize,
+    broker_addr: &str,
+    shared_snapshot: SharedSnapshot,
+) -> Result<()> {
     run_with_embedded_broker(plan, n_agents, broker_addr, shared_snapshot, false).await
 }
 
@@ -409,14 +491,17 @@ pub async fn run_with_nats_url(
     use crate::nats_client::NatsClient;
 
     eprintln!("[distributed] connecting to external NATS at {nats_url}");
-    let mut nats = NatsClient::connect(nats_url).await
+    let mut nats = NatsClient::connect(nats_url)
+        .await
         .with_context(|| format!("Failed to connect to NATS at {nats_url}"))?;
 
     nats.subscribe(subject_register(), "reg").await?;
     nats.subscribe(subject_metrics(), "metrics").await?;
 
     // Wait for N agents (5 min timeout for remote agents).
-    eprintln!("[distributed] waiting for {n_agents} remote agent(s) to register (timeout: 300s)...");
+    eprintln!(
+        "[distributed] waiting for {n_agents} remote agent(s) to register (timeout: 300s)..."
+    );
     let mut registered: Vec<String> = Vec::new();
 
     let reg_deadline = tokio::time::sleep(Duration::from_secs(300));
@@ -447,15 +532,23 @@ pub async fn run_with_nats_url(
     let start_at_unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64 + 2_000;
+        .as_millis() as u64
+        + 2_000;
 
     // Send shards.
     for (idx, agent_id) in registered.iter().enumerate() {
         let shard_plan = shard(&plan, n_agents, idx);
-        let msg = ShardMsg { agent_id: agent_id.clone(), plan: shard_plan, start_at_unix_ms };
+        let msg = ShardMsg {
+            agent_id: agent_id.clone(),
+            plan: shard_plan,
+            start_at_unix_ms,
+        };
         let payload = serde_json::to_vec(&msg)?;
         nats.publish(&subject_shard(agent_id), &payload).await?;
-        eprintln!("[distributed] sent shard to {agent_id} ({} RPS, start_at +2s)", msg.plan.rps);
+        eprintln!(
+            "[distributed] sent shard to {agent_id} ({} RPS, start_at +2s)",
+            msg.plan.rps
+        );
     }
 
     // Aggregate metrics via a channel fed from the NATS read loop.
@@ -466,9 +559,11 @@ pub async fn run_with_nats_url(
         loop {
             match nats.next_message().await {
                 Ok((subject, payload)) if subject.starts_with("loadpilot.metrics.") => {
-                    if metrics_tx.send(payload).is_err() { break; }
+                    if metrics_tx.send(payload).is_err() {
+                        break;
+                    }
                 }
-                Ok(_) => {}  // ignore other subjects (register, control echoes)
+                Ok(_) => {} // ignore other subjects (register, control echoes)
                 Err(_) => break,
             }
         }
@@ -576,8 +671,14 @@ mod tests {
         ];
         let agg = aggregate(&agents);
         assert_eq!(agg.requests_total, 200);
-        assert_eq!(agg.latency.p50_ms, 10.0,  "p50 should be 10ms (first half of requests)");
-        assert_eq!(agg.latency.p99_ms, 100.0, "p99 should be 100ms, not 55ms average");
+        assert_eq!(
+            agg.latency.p50_ms, 10.0,
+            "p50 should be 10ms (first half of requests)"
+        );
+        assert_eq!(
+            agg.latency.p99_ms, 100.0,
+            "p99 should be 100ms, not 55ms average"
+        );
     }
 
     #[test]

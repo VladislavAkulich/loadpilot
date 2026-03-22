@@ -3,19 +3,14 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     Constant,
+    #[default]
     Ramp,
     Step,
     Spike,
-}
-
-impl Default for Mode {
-    fn default() -> Self {
-        Mode::Ramp
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -58,9 +53,7 @@ mod tests {
 
     #[test]
     fn deserialize_plan_with_tasks() {
-        let json = minimal_plan_json(
-            r#","tasks":[{"name":"ping","url":"/ping","method":"GET"}]"#,
-        );
+        let json = minimal_plan_json(r#","tasks":[{"name":"ping","url":"/ping","method":"GET"}]"#);
         let plan: ScenarioPlan = serde_json::from_str(&json).unwrap();
         assert_eq!(plan.tasks.len(), 1);
         assert_eq!(plan.tasks[0].name, "ping");
@@ -70,9 +63,7 @@ mod tests {
 
     #[test]
     fn deserialize_task_default_method_is_get() {
-        let json = minimal_plan_json(
-            r#","tasks":[{"name":"t","url":"/"}]"#,
-        );
+        let json = minimal_plan_json(r#","tasks":[{"name":"t","url":"/"}]"#);
         let plan: ScenarioPlan = serde_json::from_str(&json).unwrap();
         assert_eq!(plan.tasks[0].method, "GET");
     }
@@ -96,9 +87,8 @@ mod tests {
 
     #[test]
     fn roundtrip_serialize_deserialize() {
-        let json = minimal_plan_json(
-            r#","tasks":[{"name":"t","url":"/","method":"POST","weight":3}]"#,
-        );
+        let json =
+            minimal_plan_json(r#","tasks":[{"name":"t","url":"/","method":"POST","weight":3}]"#);
         let plan: ScenarioPlan = serde_json::from_str(&json).unwrap();
         let re_serialized = serde_json::to_string(&plan).unwrap();
         let plan2: ScenarioPlan = serde_json::from_str(&re_serialized).unwrap();
@@ -151,4 +141,6 @@ pub struct ScenarioPlan {
     pub steps: u64,
 }
 
-fn default_steps() -> u64 { 5 }
+fn default_steps() -> u64 {
+    5
+}

@@ -7,7 +7,6 @@ import json
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -16,9 +15,9 @@ from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 
-from loadpilot.dsl import _scenarios, _clear_scenarios
-from loadpilot.models import AgentMetrics, ScenarioPlan, TaskPlan, VUserConfig, parse_duration
 from loadpilot import report as _report
+from loadpilot.dsl import _clear_scenarios, _scenarios
+from loadpilot.models import AgentMetrics, ScenarioPlan, TaskPlan, VUserConfig, parse_duration
 
 app = typer.Typer(
     name="loadpilot",
@@ -89,9 +88,7 @@ def _build_plan(
         matches = [s for s in _scenarios if s.name == scenario_name]
         if not matches:
             available = ", ".join(s.name for s in _scenarios)
-            raise ValueError(
-                f"Scenario {scenario_name!r} not found. Available: {available}"
-            )
+            raise ValueError(f"Scenario {scenario_name!r} not found. Available: {available}")
         s = matches[0]
     else:
         s = _scenarios[0]
@@ -107,6 +104,7 @@ def _build_plan(
     # For scenarios that reference self.* set in on_start the mock run may fail;
     # those errors are silently ignored and the task falls back to url="/".
     from loadpilot._bridge import MockClient as _MockClient
+
     try:
         tmp = s.cls()
     except Exception:
@@ -120,6 +118,7 @@ def _build_plan(
             try:
                 import asyncio as _asyncio
                 import inspect as _inspect
+
                 result = td.func(tmp, mock)
                 if _inspect.iscoroutine(result):
                     _asyncio.run(result)
@@ -128,19 +127,22 @@ def _build_plan(
                     url, method, headers, body = p, (m or "GET"), h, b
             except Exception:
                 pass  # fall back to defaults for state-dependent tasks
-        tasks.append(TaskPlan(name=td.name, weight=td.weight,
-                               url=url, method=method,
-                               headers=headers, body_template=body))
+        tasks.append(
+            TaskPlan(
+                name=td.name,
+                weight=td.weight,
+                url=url,
+                method=method,
+                headers=headers,
+                body_template=body,
+            )
+        )
 
     # Enable the PyO3 bridge when Python needs to run at request time:
     # - lifecycle hooks (on_start / on_stop carry per-VUser state)
     # - check_{task} methods need the real HTTP response
     has_check = any(f"check_{td.name}" in s.cls.__dict__ for td in s.tasks)
-    has_callbacks = (
-        "on_start" in s.cls.__dict__
-        or "on_stop" in s.cls.__dict__
-        or has_check
-    )
+    has_callbacks = "on_start" in s.cls.__dict__ or "on_stop" in s.cls.__dict__ or has_check
 
     # ── Distributed pre-auth pool ──────────────────────────────────────────────
     # In distributed mode PyO3 callbacks can't run on remote agents.
@@ -152,10 +154,9 @@ def _build_plan(
     vuser_configs: list[VUserConfig] = []
     if distributed and "on_start" in s.cls.__dict__:
         from loadpilot.client import LoadClient as _LoadClient
+
         pool_size = min(n_vusers, 20)
-        console.print(
-            f"[dim]Distributed pre-auth: running on_start for {pool_size} VUsers…[/]"
-        )
+        console.print(f"[dim]Distributed pre-auth: running on_start for {pool_size} VUsers…[/]")
         failed_first = False
         for i in range(pool_size):
             try:
@@ -175,8 +176,7 @@ def _build_plan(
             except Exception as exc:
                 if i == 0:
                     console.print(
-                        f"[yellow]on_start pre-auth failed: {exc}. "
-                        "Falling back to static mode.[/]"
+                        f"[yellow]on_start pre-auth failed: {exc}. Falling back to static mode.[/]"
                     )
                     failed_first = True
                     break
@@ -209,9 +209,7 @@ def _render_dashboard(metrics: AgentMetrics, scenario_name: str) -> Panel:
     duration_str = _fmt_duration(int(metrics.elapsed_secs))
 
     error_pct = (
-        (metrics.errors_total / metrics.requests_total * 100)
-        if metrics.requests_total > 0
-        else 0.0
+        (metrics.errors_total / metrics.requests_total * 100) if metrics.requests_total > 0 else 0.0
     )
 
     progress_pct = min(
@@ -250,10 +248,10 @@ def _render_dashboard(metrics: AgentMetrics, scenario_name: str) -> Panel:
 
 
 _THRESHOLD_LABELS: dict[str, str] = {
-    "p50_ms":     "p50 latency",
-    "p95_ms":     "p95 latency",
-    "p99_ms":     "p99 latency",
-    "max_ms":     "max latency",
+    "p50_ms": "p50 latency",
+    "p95_ms": "p95 latency",
+    "p99_ms": "p99 latency",
+    "max_ms": "max latency",
     "error_rate": "error rate",
 }
 
@@ -262,19 +260,18 @@ def _check_thresholds(metrics: AgentMetrics, thresholds: dict[str, float]) -> bo
     """Evaluate SLA thresholds against final metrics. Prints a result table.
     Returns True if any threshold is breached."""
     error_rate = (
-        metrics.errors_total / metrics.requests_total * 100
-        if metrics.requests_total > 0 else 0.0
+        metrics.errors_total / metrics.requests_total * 100 if metrics.requests_total > 0 else 0.0
     )
     actual: dict[str, float] = {
-        "p50_ms":     metrics.latency.p50_ms,
-        "p95_ms":     metrics.latency.p95_ms,
-        "p99_ms":     metrics.latency.p99_ms,
-        "max_ms":     metrics.latency.max_ms,
+        "p50_ms": metrics.latency.p50_ms,
+        "p95_ms": metrics.latency.p95_ms,
+        "p99_ms": metrics.latency.p99_ms,
+        "max_ms": metrics.latency.max_ms,
         "error_rate": error_rate,
     }
 
     breached: list[tuple[str, float, float]] = []
-    passed:   list[tuple[str, float, float]] = []
+    passed: list[tuple[str, float, float]] = []
 
     for key, limit in thresholds.items():
         value = actual.get(key)
@@ -291,9 +288,7 @@ def _check_thresholds(metrics: AgentMetrics, thresholds: dict[str, float]) -> bo
     for key, value, limit in passed:
         u = unit(key) or "ms"
         label = _THRESHOLD_LABELS.get(key, key)
-        console.print(
-            f"  [green]✓[/]  {label:<16} {value:>8.1f}{u}  <  {limit:.1f}{u}"
-        )
+        console.print(f"  [green]✓[/]  {label:<16} {value:>8.1f}{u}  <  {limit:.1f}{u}")
     for key, value, limit in breached:
         u = unit(key) or "ms"
         label = _THRESHOLD_LABELS.get(key, key)
@@ -397,27 +392,40 @@ def run_command(
         "http://localhost:8000", "--target", "-t", help="Base URL of the system under test."
     ),
     scenario_name: Optional[str] = typer.Option(
-        None, "--scenario", "-s",
+        None,
+        "--scenario",
+        "-s",
         help="Scenario class name to run. Required when the file defines multiple @scenario classes.",
     ),
-    agents: int = typer.Option(1, "--agents", "-a", help="Number of agent processes. 1 = single-process mode; >1 = distributed mode with embedded NATS broker."),
+    agents: int = typer.Option(
+        1,
+        "--agents",
+        "-a",
+        help="Number of agent processes. 1 = single-process mode; >1 = distributed mode with embedded NATS broker.",
+    ),
     external_agents: int = typer.Option(
-        0, "--external-agents", "-e",
+        0,
+        "--external-agents",
+        "-e",
         help="Wait for N externally started agents instead of spawning them. Use with --nats-url for remote agents.",
     ),
     nats_url: Optional[str] = typer.Option(
-        None, "--nats-url",
+        None,
+        "--nats-url",
         help="External NATS URL for remote agents (e.g. nats://host:4222). Use with --external-agents.",
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print the test plan JSON and exit without running."
     ),
     report: Optional[Path] = typer.Option(
-        None, "--report", "-r",
+        None,
+        "--report",
+        "-r",
         help="Write an HTML report to this path after the test (e.g. --report report.html).",
     ),
     threshold: Optional[list[str]] = typer.Option(
-        None, "--threshold",
+        None,
+        "--threshold",
         help=(
             "SLA threshold in KEY=VALUE format. Overrides thresholds from @scenario. "
             "Supported keys: p50_ms, p95_ms, p99_ms, max_ms, error_rate. "
@@ -425,7 +433,8 @@ def run_command(
         ),
     ),
     results_json: Optional[Path] = typer.Option(
-        None, "--results-json",
+        None,
+        "--results-json",
         help="Write final metrics as JSON to this path (e.g. --results-json results.json).",
     ),
 ):
@@ -433,7 +442,9 @@ def run_command(
     # ── No file given: TUI browser or error ───────────────────────────────────
     if scenario_file is None:
         if not sys.stdin.isatty():
-            console.print("[red]Error:[/] Specify a scenario file or run interactively in a terminal.")
+            console.print(
+                "[red]Error:[/] Specify a scenario file or run interactively in a terminal."
+            )
             raise typer.Exit(1)
         search_dir = Path("scenarios") if Path("scenarios").is_dir() else Path(".")
         result = _tui_pick_scenario(search_dir)
@@ -454,6 +465,7 @@ def run_command(
     if len(_scenarios) > 1 and not scenario_name:
         if sys.stdin.isatty():
             import questionary
+
             choices = [
                 questionary.Choice(
                     title=f"{s.name}  ({s.rps} RPS · {s.duration} · {s.mode})",
@@ -702,13 +714,18 @@ class ExampleFlow(VUser):
         dst = monitoring_dir / src.name
         if not dst.exists():
             import shutil
+
             shutil.copy2(src, dst)
 
     console.print(f"[bold green]Initialised LoadPilot project[/] in [cyan]{directory}[/]")
     console.print()
-    console.print("  [dim]scenarios/example.py[/]          — edit this to write your first scenario")
+    console.print(
+        "  [dim]scenarios/example.py[/]          — edit this to write your first scenario"
+    )
     console.print("  [dim].env.example[/]                   — copy to .env and set TARGET_URL")
-    console.print("  [dim]monitoring/docker-compose.yml[/]  — Prometheus + Grafana (auto-configured)")
+    console.print(
+        "  [dim]monitoring/docker-compose.yml[/]  — Prometheus + Grafana (auto-configured)"
+    )
     console.print()
     console.print("Run your first test:")
     try:
