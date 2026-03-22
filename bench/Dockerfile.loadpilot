@@ -1,15 +1,57 @@
-FROM python:3.12-slim AS rust-builder
+# Stage 1: Build Python 3.13t (free-threaded, no-GIL) from source.
+FROM debian:bookworm-slim AS python-builder
+ARG PYTHON_VERSION=3.13.2
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl pkg-config libssl-dev python3-dev build-essential && \
+    ca-certificates wget xz-utils build-essential libssl-dev zlib1g-dev libbz2-dev \
+    libreadline-dev libsqlite3-dev libncurses5-dev \
+    libffi-dev liblzma-dev pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+RUN wget -q https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz && \
+    tar -xf Python-${PYTHON_VERSION}.tar.xz && \
+    cd Python-${PYTHON_VERSION} && \
+    ./configure \
+        --prefix=/opt/python3t \
+        --disable-gil \
+        --with-ensurepip=install \
+        --enable-shared \
+        LDFLAGS="-Wl,-rpath,/opt/python3t/lib" && \
+    make -j$(nproc) && \
+    make install && \
+    cd / && rm -rf Python-${PYTHON_VERSION}*
+
+# Stage 2: Build Rust coordinator and install Python CLI (Rust is available for
+# any packages like pydantic-core that need to compile from source).
+FROM debian:bookworm-slim AS app-builder
+COPY --from=python-builder /opt/python3t /opt/python3t
+ENV PATH="/opt/python3t/bin:$PATH"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl pkg-config libssl-dev build-essential && \
     rm -rf /var/lib/apt/lists/*
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.85.0
 ENV PATH="/root/.cargo/bin:$PATH"
+
+# Build the coordinator binary.
 WORKDIR /engine
 COPY engine/ .
-ENV PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
+ENV PYO3_PYTHON=/opt/python3t/bin/python3
+# Embed rpath so the coordinator binary finds libpython3.13t at runtime
+# without requiring LD_LIBRARY_PATH.
+ENV RUSTFLAGS="-C link-arg=-Wl,-rpath,/opt/python3t/lib"
 RUN cargo build --release --package coordinator
 
-FROM python:3.12-slim
+# Install the loadpilot CLI and all its Python dependencies.
+# Rust is present here so that packages like pydantic-core can build from source
+# if no pre-built wheel exists for Python 3.13t.
 COPY cli/ /app/cli/
-COPY --from=rust-builder /engine/target/release/coordinator /app/cli/loadpilot/coordinator
-RUN LOADPILOT_SKIP_CARGO=1 pip install --no-cache-dir /app/cli/
+RUN cp /engine/target/release/coordinator /app/cli/loadpilot/coordinator
+RUN LOADPILOT_SKIP_CARGO=1 /opt/python3t/bin/pip3 install --no-cache-dir /app/cli/
+
+# Stage 3: Lean runtime image — copy only the Python tree (includes site-packages)
+# and the coordinator binary (already embedded in the loadpilot package).
+FROM debian:bookworm-slim
+COPY --from=app-builder /opt/python3t /opt/python3t
+ENV PATH="/opt/python3t/bin:$PATH"
+# Runtime shared-library deps for Python and common extension modules.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libssl3 zlib1g libbz2-1.0 liblzma5 libffi8 && \
+    rm -rf /var/lib/apt/lists/*

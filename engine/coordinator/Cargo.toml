@@ -16,4 +16,4 @@ axum = "0.7"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
-pyo3 = { version = "0.23", features = ["auto-initialize"] }
+pyo3 = { version = "0.28", features = ["auto-initialize"] }

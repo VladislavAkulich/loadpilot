@@ -5,7 +5,7 @@
 ///   2. `call_on_start(i)` runs `vuser.on_start(LoadClient)` for VUser i.
 ///   3. `run_task(i, "task_name")` runs the task with a `RustClient`.
 ///      Inside `RustClient.get/post/...`, the GIL is released via
-///      `py.allow_threads` while reqwest executes the HTTP request.
+///      `Python::detach` while reqwest executes the HTTP request.
 ///      Each call is recorded; results are returned as Vec<CallResult>.
 ///   4. `call_on_stop(i)` runs `vuser.on_stop(LoadClient)` for VUser i.
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ pub struct RustResponse {
 
 #[pymethods]
 impl RustResponse {
-    fn json(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn json(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let value: serde_json::Value = serde_json::from_str(&self.text).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("JSON decode error: {}", e))
         })?;
@@ -53,12 +53,12 @@ impl RustResponse {
     }
 
     #[getter]
-    fn headers(&self, py: Python<'_>) -> PyObject {
+    fn headers(&self, py: Python<'_>) -> Py<PyAny> {
         let dict = PyDict::new(py);
         for (k, v) in &self.headers_map {
             let _ = dict.set_item(k, v);
         }
-        dict.into()
+        dict.into_any().unbind()
     }
 }
 
@@ -67,7 +67,7 @@ impl RustResponse {
 /// Python-callable HTTP client backed by reqwest.
 ///
 /// Passed to task methods instead of httpx LoadClient. Each HTTP method
-/// releases the GIL via `py.allow_threads` while the request is in flight,
+/// releases the GIL via `Python::detach` while the request is in flight,
 /// so the Python scheduler can run other work and the tokio runtime can
 /// drive other async tasks concurrently.
 ///
@@ -123,10 +123,10 @@ impl RustClient {
 
         let t0 = Instant::now();
 
-        // Release the GIL for the duration of the HTTP request.
-        // `allow_threads` re-acquires it before returning.
-        let http_result = py.allow_threads(move || {
-            handle.block_on(async move {
+        // Python 3.13t has no GIL — call block_on directly from this
+        // spawn_blocking thread. On GIL-enabled Python builds, wrap this
+        // with py.allow_threads(|| ...) to release the GIL during I/O.
+        let http_result = handle.block_on(async move {
                 let mut req = match method_upper.as_str() {
                     "GET" => client.get(&url),
                     "POST" => client.post(&url),
@@ -169,7 +169,6 @@ impl RustClient {
                     }
                     Err(e) => Err(e.to_string()),
                 }
-            })
         });
 
         let elapsed_ms = t0.elapsed().as_millis() as u64;
@@ -274,9 +273,10 @@ pub struct PythonBridge {
     /// One mutex per VUser — tasks for different VUsers run in parallel;
     /// tasks for the same VUser are serialised (correct per-VUser semantics).
     ///
-    /// Lock order: always acquire VUser mutex BEFORE entering Python::with_gil.
-    /// This prevents the GIL → VUser-mutex deadlock that would occur if the
-    /// GIL were held while waiting for the per-VUser lock.
+    /// With free-threaded Python (3.13t) there is no GIL, so multiple VUsers
+    /// can execute Python callbacks truly in parallel. The per-VUser mutex
+    /// remains necessary to protect per-VUser Python state (e.g. self.token)
+    /// when the same VUser receives concurrent task dispatches.
     vusers: Vec<Mutex<VUser>>,
     base_url: String,
     has_on_start: bool,
@@ -294,7 +294,7 @@ impl PythonBridge {
         http_client: reqwest::Client,
         rt_handle: tokio::runtime::Handle,
     ) -> Result<Self> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             // Pre-import the loadpilot package before adding the scenario directory
             // to sys.path. This prevents a circular import when the scenario file
             // itself is named loadpilot.py (which would shadow the package if the
@@ -325,7 +325,7 @@ impl PythonBridge {
 
             let mut vusers = Vec::with_capacity(n_vusers);
             for _ in 0..n_vusers {
-                let instance: Py<PyAny> = cls.call0()?.into_py(py);
+                let instance: Py<PyAny> = cls.call0()?.unbind();
                 vusers.push(Mutex::new(VUser { instance }));
             }
 
@@ -349,11 +349,11 @@ impl PythonBridge {
         if !self.has_on_start {
             return Ok(());
         }
-        // Acquire VUser lock BEFORE entering Python::with_gil (lock-order rule).
+        // Acquire VUser lock before attaching to Python.
         // Recover from a poisoned mutex — a previous panic in a task should not
         // permanently block this VUser.
         let vuser = self.vusers[idx].lock().unwrap_or_else(|e| e.into_inner());
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let client = self.make_real_client(py)?;
             vuser.instance.call_method1(py, "on_start", (client,))?;
             Ok(())
@@ -365,9 +365,8 @@ impl PythonBridge {
         if !self.has_on_stop {
             return Ok(());
         }
-        // Acquire VUser lock BEFORE entering Python::with_gil (lock-order rule).
         let vuser = self.vusers[idx].lock().unwrap_or_else(|e| e.into_inner());
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let client = self.make_real_client(py)?;
             vuser.instance.call_method1(py, "on_stop", (client,))?;
             Ok(())
@@ -375,26 +374,14 @@ impl PythonBridge {
         .map_err(|e: PyErr| anyhow!("on_stop error (VUser {}): {}", idx, e))
     }
 
-    /// Run the task with a `RustClient`.  The client releases the GIL for each
+    /// Run the task with a `RustClient`. The client releases the GIL for each
     /// HTTP request so other Python callbacks and tokio tasks proceed in parallel.
     /// Returns one `CallResult` per HTTP call made by the task.
     pub fn run_task(&self, vuser_idx: usize, task_name: &str) -> Result<Vec<CallResult>> {
-        // Acquire VUser lock BEFORE entering Python::with_gil.
-        //
-        // Lock order: VUser mutex → GIL.
-        //
-        // If we held the GIL first and then tried to acquire the VUser mutex,
-        // another thread could hold the VUser mutex and be waiting for the GIL
-        // after py.allow_threads() — a classic ABBA deadlock.
-        //
-        // With this order: a thread waiting for the VUser mutex has NOT yet
-        // called with_gil, so it cannot block the GIL.  The thread that holds
-        // the VUser mutex may be inside py.allow_threads() (GIL released), at
-        // which point it is waiting for the reqwest future — not for any lock —
-        // so no cycle exists.
+        // Acquire VUser lock before attaching to Python.
         let vuser = self.vusers[vuser_idx].lock().unwrap_or_else(|e| e.into_inner());
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let rust_client = Py::new(
                 py,
                 RustClient::new(
@@ -499,7 +486,7 @@ fn extract_kwargs(
     };
 
     if let Some(h) = kw.get_item("headers")? {
-        let h_dict = h.downcast::<PyDict>()?;
+        let h_dict = h.cast::<PyDict>()?;
         for (k, v) in h_dict {
             headers.insert(k.extract::<String>()?, v.extract::<String>()?);
         }
@@ -511,7 +498,7 @@ fn extract_kwargs(
         body = Some(s);
     } else if let Some(data_val) = kw.get_item("data")? {
         // form-encoded: serialize dict as key=value&key=value
-        if let Ok(d) = data_val.downcast::<PyDict>() {
+        if let Ok(d) = data_val.cast::<PyDict>() {
             let mut parts = Vec::new();
             for (k, v) in d {
                 parts.push(format!(
@@ -542,31 +529,37 @@ fn urlencoded_str(s: &str) -> String {
 }
 
 /// Recursively convert a serde_json::Value into a Python object.
-fn json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObject> {
+fn json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<PyAny>> {
     match value {
         serde_json::Value::Null => Ok(py.None()),
-        serde_json::Value::Bool(b) => Ok(b.into_py(py)),
+        serde_json::Value::Bool(b) => {
+            // bool::into_pyobject returns Borrowed (Python True/False singletons).
+            // Deref to Bound explicitly so that .clone() calls Bound::clone (not Borrowed::clone),
+            // giving an owned Bound that can be moved into into_any().
+            let b_py = (*b).into_pyobject(py)?;
+            Ok((*b_py).clone().into_any().unbind())
+        }
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(i.into_py(py))
+                Ok(i.into_pyobject(py)?.into_any().unbind())
             } else {
-                Ok(n.as_f64().unwrap_or(0.0).into_py(py))
+                Ok(n.as_f64().unwrap_or(0.0).into_pyobject(py)?.into_any().unbind())
             }
         }
-        serde_json::Value::String(s) => Ok(s.into_py(py)),
+        serde_json::Value::String(s) => Ok(s.clone().into_pyobject(py)?.into_any().unbind()),
         serde_json::Value::Array(arr) => {
             let list = pyo3::types::PyList::empty(py);
             for item in arr {
                 list.append(json_to_py(py, item)?)?;
             }
-            Ok(list.into())
+            Ok(list.into_any().unbind())
         }
         serde_json::Value::Object(map) => {
             let dict = PyDict::new(py);
             for (k, v) in map {
                 dict.set_item(k, json_to_py(py, v)?)?;
             }
-            Ok(dict.into())
+            Ok(dict.into_any().unbind())
         }
     }
 }
