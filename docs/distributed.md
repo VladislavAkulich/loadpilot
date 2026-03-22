@@ -59,12 +59,12 @@ Deploy a NATS server separately (e.g. Railway, Fly.io, or a VPS):
 # Deploy NATS: Docker image nats:latest, TCP port 4222
 
 # Start agents with COORDINATOR env var pointing at your NATS
-COORDINATOR=monorail.proxy.rlwy.net:PORT AGENT_ID=agent-0 loadpilot-agent
+COORDINATOR=your-nats.railway.app:PORT AGENT_ID=agent-0 loadpilot-agent
 
 # Run test with external NATS
 loadpilot run scenarios/checkout.py \
   --target https://api.example.com \
-  --nats-url nats://monorail.proxy.rlwy.net:PORT \
+  --nats-url nats://your-nats.railway.app:PORT \
   --external-agents 2 \
   --report results/report.html
 ```
