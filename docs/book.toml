@@ -1,0 +1,16 @@
+[book]
+title = "LoadPilot"
+description = "Write load tests in Python. Run them at Rust speed."
+authors = ["Vladislav Akulich"]
+language = "en"
+src = "src"
+
+[output.html]
+site-url = "/loadpilot/"
+git-repository-url = "https://github.com/VladislavAkulich/loadpilot"
+git-repository-icon = "fa-github"
+edit-url-template = "https://github.com/VladislavAkulich/loadpilot/edit/main/docs/src/{path}"
+
+[output.html.fold]
+enable = true
+level = 0

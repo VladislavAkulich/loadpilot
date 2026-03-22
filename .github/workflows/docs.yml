@@ -24,26 +24,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: "latest"
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
-      - name: Setup Ruby
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "3.3"
-          bundler-cache: true
-          working-directory: docs
-
-      - name: Build with Jekyll
+      - name: Build docs
         working-directory: docs
-        run: bundle exec jekyll build --destination ../_site
-        env:
-          JEKYLL_ENV: production
+        run: mdbook build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: _site
+          path: docs/book
 
   deploy:
     environment:
