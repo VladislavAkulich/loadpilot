@@ -2,7 +2,8 @@ title: LoadPilot
 description: Write load tests in Python. Run them at Rust speed.
 theme: just-the-docs
 
-url: https://VladislavAkulich.github.io/loadpilot
+url: https://vladislavakulich.github.io
+baseurl: /loadpilot
 
 aux_links:
   "GitHub":
