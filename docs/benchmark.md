@@ -1,3 +1,8 @@
+---
+title: Benchmark
+nav_order: 6
+---
+
 # Benchmark
 
 How to reproduce the LoadPilot benchmark results.

@@ -1,3 +1,8 @@
+---
+title: Distributed Mode
+nav_order: 5
+---
+
 # Distributed Mode
 
 Run a load test across multiple machines. The CLI output is identical to

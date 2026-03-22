@@ -1,0 +1,25 @@
+title: LoadPilot
+description: Write load tests in Python. Run them at Rust speed.
+theme: just-the-docs
+
+url: https://VladislavAkulich.github.io/loadpilot
+
+aux_links:
+  "GitHub":
+    - "https://github.com/VladislavAkulich/loadpilot"
+  "PyPI":
+    - "https://pypi.org/project/loadpilot/"
+
+aux_links_new_tab: true
+
+color_scheme: dark
+
+footer_content: "LoadPilot is MIT licensed."
+
+back_to_top: true
+back_to_top_text: "Back to top"
+
+heading_anchors: true
+
+plugins:
+  - jekyll-seo-tag

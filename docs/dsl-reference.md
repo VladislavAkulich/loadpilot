@@ -1,3 +1,8 @@
+---
+title: DSL Reference
+nav_order: 3
+---
+
 # DSL Reference
 
 ## `@scenario`

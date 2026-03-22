@@ -1,3 +1,8 @@
+---
+title: CLI Reference
+nav_order: 4
+---
+
 # CLI Reference
 
 ## Commands
