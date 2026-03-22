@@ -3,6 +3,8 @@ name = "loadpilot"
 version = "0.1.0"
 requires-python = ">=3.12"
 license = { text = "MIT" }
+readme = "README.md"
+description = "Write load tests in Python. Run them at Rust speed."
 dependencies = [
     "typer",
     "httpx",

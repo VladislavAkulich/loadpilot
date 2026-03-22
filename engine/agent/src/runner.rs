@@ -13,7 +13,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{mpsc, Semaphore},
@@ -67,6 +66,7 @@ impl Default for Mode {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct Plan {
     pub name: String,
     pub rps: u64,
@@ -375,8 +375,6 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
     let tick_ms = 50u64;
     let mut window_start = Instant::now();
     let mut window_reqs = 0u64;
-    let mut current_rps = 0.0f64;
-
     loop {
         let elapsed = start.elapsed();
 
@@ -456,7 +454,7 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
         let window_elapsed = window_start.elapsed();
         window_reqs += requests_this_tick;
         if window_elapsed >= Duration::from_secs(1) {
-            current_rps = window_reqs as f64 / window_elapsed.as_secs_f64();
+            let current_rps = window_reqs as f64 / window_elapsed.as_secs_f64();
             window_reqs = 0;
             window_start = Instant::now();
 
