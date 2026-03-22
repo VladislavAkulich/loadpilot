@@ -22,17 +22,19 @@ jobs:
             wheel_tag: manylinux_2_38_x86_64
             agent_name: agent-linux-x86_64
 
-          # macOS Intel — cross-compiled from ARM runner (macos-13 is deprecated).
+          # macOS Intel — cross-compiled from ARM runner.
           - os: macos-latest
             target: x86_64-apple-darwin
-            wheel_tag: macosx_13_0_x86_64
+            wheel_tag: macosx_10_13_x86_64
+            macosx_deployment_target: "10.13"
             agent_name: agent-darwin-x86_64
             name: macos-intel
 
           # macOS Apple Silicon (M1/M2/M3).
           - os: macos-latest
             target: aarch64-apple-darwin
-            wheel_tag: macosx_14_0_arm64
+            wheel_tag: macosx_11_0_arm64
+            macosx_deployment_target: "11.0"
             agent_name: agent-darwin-arm64
             name: macos-arm64
 
@@ -87,6 +89,7 @@ jobs:
         working-directory: cli
         env:
           LOADPILOT_SKIP_CARGO: "1"
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
         run: python -m build --wheel --no-isolation
 
       # Retag linux wheel to manylinux so PyPI accepts it.
@@ -94,7 +97,7 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: cli
         run: |
-          wheel tags --platform-tag manylinux_2_28_x86_64 --remove dist/*.whl
+          wheel tags --platform-tag manylinux_2_38_x86_64 --remove dist/*.whl
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
