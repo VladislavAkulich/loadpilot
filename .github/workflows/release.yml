@@ -95,6 +95,20 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
         run: python -m build --wheel --no-isolation
 
+      # macOS: repack wheel with zip -X to strip Mac metadata and fix ZIP size headers.
+      - name: Repack wheel (macOS)
+        if: runner.os == 'macOS'
+        working-directory: cli
+        run: |
+          for whl in dist/*.whl; do
+            tmp="${whl%.whl}_tmp"
+            mkdir -p "$tmp"
+            unzip -q "$whl" -d "$tmp"
+            rm "$whl"
+            (cd "$tmp" && zip -qrX "../$(basename "$whl")" .)
+            rm -rf "$tmp"
+          done
+
       # Retag linux wheel to manylinux so PyPI accepts it.
       - name: Retag wheel to manylinux (Linux)
         if: runner.os == 'Linux'
