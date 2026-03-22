@@ -9,7 +9,7 @@ on:
 jobs:
   # ── Build platform wheels ──────────────────────────────────────────────────
   build-wheels:
-    name: Build wheel (${{ matrix.os }})
+    name: Build wheel (${{ matrix.name || matrix.os }})
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -27,12 +27,14 @@ jobs:
             target: x86_64-apple-darwin
             wheel_tag: macosx_13_0_x86_64
             agent_name: agent-darwin-x86_64
+            name: macos-intel
 
           # macOS Apple Silicon (M1/M2/M3).
           - os: macos-latest
             target: aarch64-apple-darwin
             wheel_tag: macosx_14_0_arm64
             agent_name: agent-darwin-arm64
+            name: macos-arm64
 
           # Windows x86_64.
           - os: windows-latest

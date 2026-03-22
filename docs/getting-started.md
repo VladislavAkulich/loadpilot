@@ -4,6 +4,7 @@
 
 - Python 3.12+
 - An HTTP service to test against
+- Platform: Linux x86_64, macOS (Intel or Apple Silicon), Windows x86_64
 
 ## Install
 

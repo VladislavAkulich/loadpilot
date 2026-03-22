@@ -35,6 +35,8 @@ pip install loadpilot
 
 No Rust required — the coordinator binary is bundled in the wheel.
 
+**Supported platforms:** Linux x86_64 · macOS Intel · macOS Apple Silicon · Windows x86_64
+
 ---
 
 ## Quick Start
