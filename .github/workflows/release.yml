@@ -95,19 +95,27 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
         run: python -m build --wheel --no-isolation
 
-      # macOS: repack wheel with zip -X to strip Mac metadata and fix ZIP size headers.
+      # macOS: repack wheel with Python zipfile to avoid ZIP data-descriptor format
+      # that causes PyPI "Mis-matched data size" rejection.
       - name: Repack wheel (macOS)
         if: runner.os == 'macOS'
         working-directory: cli
         run: |
-          for whl in dist/*.whl; do
-            tmp="${whl%.whl}_tmp"
-            mkdir -p "$tmp"
-            unzip -q "$whl" -d "$tmp"
-            rm "$whl"
-            (cd "$tmp" && zip -qrX "../$(basename "$whl")" .)
-            rm -rf "$tmp"
-          done
+          python3 - <<'EOF'
+          import glob, os, tempfile, zipfile
+          for whl in glob.glob("dist/*.whl"):
+              with tempfile.TemporaryDirectory() as tmp:
+                  with zipfile.ZipFile(whl, 'r') as z:
+                      z.extractall(tmp)
+                  os.remove(whl)
+                  with zipfile.ZipFile(whl, 'w', zipfile.ZIP_DEFLATED, allowZip64=False) as zout:
+                      for root, dirs, files in os.walk(tmp):
+                          dirs.sort()
+                          for f in sorted(files):
+                              fp = os.path.join(root, f)
+                              arcname = os.path.relpath(fp, tmp)
+                              zout.write(fp, arcname)
+          EOF
 
       # Retag linux wheel to manylinux so PyPI accepts it.
       - name: Retag wheel to manylinux (Linux)
