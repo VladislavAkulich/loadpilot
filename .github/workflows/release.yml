@@ -79,6 +79,9 @@ jobs:
           Copy-Item engine\target\${{ matrix.target }}\release\coordinator.exe cli\loadpilot\coordinator.exe
           Copy-Item engine\target\${{ matrix.target }}\release\agent.exe agent-bin.exe
 
+      - name: Copy README for package build
+        run: cp README.md cli/README.md
+
       # Build the wheel — skip cargo inside hatch_build.py because binary is already staged.
       - name: Build wheel
         working-directory: cli
@@ -116,6 +119,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install hatchling build
+      - run: cp README.md cli/README.md
       - working-directory: cli
         run: python -m build --sdist
       - uses: actions/upload-artifact@v4

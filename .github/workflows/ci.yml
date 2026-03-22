@@ -15,6 +15,9 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
+      - name: Copy README for package build
+        run: cp README.md cli/README.md
+
       - name: Install dependencies
         working-directory: cli
         run: uv sync --extra dev
@@ -84,6 +87,9 @@ jobs:
         run: cargo build --package coordinator
 
       - uses: astral-sh/setup-uv@v5
+
+      - name: Copy README for package build
+        run: cp README.md cli/README.md
 
       - name: Install dependencies
         working-directory: cli
