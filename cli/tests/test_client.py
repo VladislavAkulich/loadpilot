@@ -8,8 +8,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from loadpilot.client import LoadClient, ResponseWrapper
-
+from loadpilot.client import LoadClient
 
 # ── Minimal mock server ────────────────────────────────────────────────────────
 
