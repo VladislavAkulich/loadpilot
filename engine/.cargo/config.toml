@@ -1,0 +1,8 @@
+[alias]
+# Run unit tests with line coverage summary (terminal output).
+# Usage: cargo cov
+cov = "llvm-cov --package coordinator --summary-only"
+
+# Run unit tests with full HTML report → target/llvm-cov/html/index.html
+# Usage: cargo cov-html
+cov-html = "llvm-cov --package coordinator --html --open"

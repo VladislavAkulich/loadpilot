@@ -14,6 +14,8 @@ dependencies = [
 dev = [
     "pytest>=8",
     "anyio[trio]",
+    "pytest-cov>=5",
+    "coverage>=7",
 ]
 
 [project.scripts]
@@ -37,5 +39,12 @@ artifacts = [
     "loadpilot/templates/monitoring/grafana-dashboard.json",
 ]
 
+[tool.pytest.ini_options]
+addopts = "--cov=loadpilot --cov-report=term-missing --cov-report=html:htmlcov"
+
+[tool.coverage.run]
+omit = ["tests/*"]
+
 [tool.ruff]
 line-length = 100
+

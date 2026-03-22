@@ -141,3 +141,69 @@ def test_distributed_vuser_configs_empty_when_no_on_start(tmp_path):
 
     plan = _build_plan(tmp_path / "s.py", "http://localhost", distributed=True)
     assert plan.vuser_configs == []
+
+
+# ── n_vusers formula ──────────────────────────────────────────────────────────
+
+def test_n_vusers_calculation_minimum(tmp_path):
+    """Low-RPS scenarios get the floor of 5 VUsers (min(max(5, rps//100), 100))."""
+    @scenario(rps=50)
+    class LowRpsFlow(VUser):
+        def on_start(self, client):
+            pass
+
+        @task()
+        def hit(self, client):
+            client.get("/")
+
+    plan = _build_plan(tmp_path / "s.py", "http://localhost")
+    assert plan.n_vusers == 5  # max(5, 50//100=0) = 5
+
+
+def test_n_vusers_calculation_mid_rps(tmp_path):
+    """Mid-range RPS: n_vusers = rps // 100 when result is between 5 and 100."""
+    @scenario(rps=1000)
+    class MidRpsFlow(VUser):
+        def on_start(self, client):
+            pass
+
+        @task()
+        def hit(self, client):
+            client.get("/")
+
+    plan = _build_plan(tmp_path / "s.py", "http://localhost")
+    assert plan.n_vusers == 10  # 1000 // 100 = 10
+
+
+def test_n_vusers_calculation_high_rps(tmp_path):
+    """Very high RPS is capped at 100 VUsers."""
+    @scenario(rps=15000)
+    class HighRpsFlow(VUser):
+        def on_start(self, client):
+            pass
+
+        @task()
+        def hit(self, client):
+            client.get("/")
+
+    plan = _build_plan(tmp_path / "s.py", "http://localhost")
+    assert plan.n_vusers == 100  # min(150, 100) = 100
+
+
+# ── check_* enables PyO3 ──────────────────────────────────────────────────────
+
+def test_check_method_enables_pyo3(tmp_path):
+    """A check_{task} method alone (no on_start) is sufficient to enable the PyO3 bridge."""
+    @scenario(rps=10)
+    class CheckOnlyFlow(VUser):
+        @task()
+        def ping(self, client):
+            client.get("/ping")
+
+        def check_ping(self, status_code, body):
+            assert status_code == 200
+
+    plan = _build_plan(tmp_path / "s.py", "http://localhost")
+    assert plan.scenario_file is not None
+    assert plan.scenario_class == "CheckOnlyFlow"
+    assert plan.n_vusers is not None

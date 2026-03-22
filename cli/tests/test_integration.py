@@ -62,7 +62,7 @@ _PYTHONPATH = f"{_CLI_ROOT}{os.pathsep}{_SITE_PACKAGES}"
 # ── Mock HTTP server ──────────────────────────────────────────────────────────
 
 class _Handler(BaseHTTPRequestHandler):
-    """Returns 200 JSON for any path except /fail (→ 404)."""
+    """Returns 200 JSON for any path except /fail (→ 404) and /error (→ 500)."""
 
     def do_GET(self):
         self._respond()
@@ -76,6 +76,10 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             self.wfile.write(b"not found")
+        elif self.path.startswith("/error"):
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(b"internal error")
         else:
             body = b'{"status":"ok","id":1}'
             self.send_response(200)
@@ -422,3 +426,213 @@ def test_pyo3_no_check_method_uses_status_code():
 
     final = metrics[-1]
     assert final.errors_total > 0
+
+
+# ── Additional static tests ───────────────────────────────────────────────────
+
+@requires_coordinator
+def test_static_errors_counted_on_500():
+    """HTTP 5xx responses must be counted as errors in static mode."""
+    with MockServer() as srv:
+        metrics = _run(_static_plan(srv.url, path="/error"))
+
+    final = metrics[-1]
+    assert final.requests_total > 0
+    assert final.errors_total == final.requests_total
+
+
+@requires_coordinator
+def test_static_connection_refused_all_errors():
+    """Requests to a closed port must all be counted as errors."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        dead_port = s.getsockname()[1]
+    # port is now closed — connection will be refused
+    metrics = _run(_static_plan(f"http://127.0.0.1:{dead_port}", duration_secs=2, ramp_up_secs=1))
+
+    final = metrics[-1]
+    assert final.requests_total > 0
+    assert final.errors_total == final.requests_total
+
+
+@requires_coordinator
+def test_static_metric_invariants():
+    """errors_total must never exceed requests_total in any snapshot."""
+    with MockServer() as srv:
+        metrics = _run(_static_plan(srv.url, path="/fail"))
+
+    for m in metrics:
+        assert m.errors_total <= m.requests_total
+
+
+@requires_coordinator
+def test_static_done_phase_only_at_end():
+    """Phase 'done' must appear exactly once, as the very last snapshot."""
+    with MockServer() as srv:
+        metrics = _run(_static_plan(srv.url))
+
+    phases = [m.phase for m in metrics]
+    assert phases[-1] == "done"
+    # No non-done phase must appear after the first done snapshot
+    first_done = phases.index("done")
+    assert all(p == "done" for p in phases[first_done:])
+
+
+# ── Additional PyO3 tests ─────────────────────────────────────────────────────
+
+@requires_coordinator
+def test_pyo3_task_exception_counted_as_error():
+    """An unhandled exception inside a task must be counted as an error."""
+    scenario_file = _write_scenario("""\
+        from loadpilot.dsl import VUser, scenario, task
+
+        @scenario(rps=5, duration="2s", ramp_up="1s")
+        class ExceptionFlow(VUser):
+            @task(weight=1)
+            def crash(self, client):
+                raise RuntimeError("intentional task failure")
+    """)
+    with MockServer() as srv:
+        plan = _pyo3_plan(srv.url, scenario_file, "ExceptionFlow", task="crash")
+        metrics = _run(plan)
+
+    final = metrics[-1]
+    assert final.requests_total > 0
+    assert final.errors_total == final.requests_total
+
+
+@requires_coordinator
+def test_pyo3_check_non_assertion_error_counts_as_error():
+    """Any exception in check_{task} (not just AssertionError) must count as error."""
+    scenario_file = _write_scenario("""\
+        from loadpilot.dsl import VUser, scenario, task
+
+        @scenario(rps=5, duration="2s", ramp_up="1s")
+        class CheckKeyErrorFlow(VUser):
+            @task(weight=1)
+            def ping(self, client):
+                client.get("/ping")
+
+            def check_ping(self, status_code, body):
+                _ = body["nonexistent_key"]  # KeyError
+    """)
+    with MockServer() as srv:
+        plan = _pyo3_plan(srv.url, scenario_file, "CheckKeyErrorFlow")
+        metrics = _run(plan)
+
+    final = metrics[-1]
+    assert final.requests_total > 0
+    assert final.errors_total == final.requests_total
+
+
+@requires_coordinator
+def test_pyo3_on_start_failure_vuser_still_processes_tasks():
+    """When on_start raises, the VUser must still process tasks (marked ready regardless)."""
+    scenario_file = _write_scenario("""\
+        from loadpilot.dsl import VUser, scenario, task
+
+        @scenario(rps=5, duration="2s", ramp_up="1s")
+        class BrokenStartFlow(VUser):
+            def on_start(self, client):
+                raise RuntimeError("on_start always fails")
+
+            @task(weight=1)
+            def ping(self, client):
+                client.get("/ping")
+    """)
+    with MockServer() as srv:
+        plan = _pyo3_plan(srv.url, scenario_file, "BrokenStartFlow")
+        metrics = _run(plan)
+
+    # Tasks must still execute even though on_start failed
+    assert metrics[-1].requests_total > 0
+
+
+@requires_coordinator
+def test_pyo3_on_stop_called_after_test():
+    """on_stop must be invoked for each VUser after the test finishes."""
+    flag_path = Path(tempfile.gettempdir()) / "lp_test_on_stop_flag.txt"
+    flag_path.unlink(missing_ok=True)
+
+    scenario_src = (
+        "import pathlib\n"
+        f"_FLAG = pathlib.Path({str(flag_path)!r})\n"
+        "from loadpilot.dsl import VUser, scenario, task\n"
+        "\n"
+        "@scenario(rps=5, duration='2s', ramp_up='1s')\n"
+        "class OnStopFlow(VUser):\n"
+        "    @task(weight=1)\n"
+        "    def ping(self, client):\n"
+        "        client.get('/ping')\n"
+        "\n"
+        "    def on_stop(self, client):\n"
+        "        _FLAG.write_text('stopped')\n"
+    )
+    scenario_file = _write_scenario(scenario_src)
+    with MockServer() as srv:
+        plan = _pyo3_plan(srv.url, scenario_file, "OnStopFlow")
+        _run(plan)
+
+    assert flag_path.exists(), "on_stop was never called"
+    flag_path.unlink(missing_ok=True)
+
+
+@requires_coordinator
+def test_pyo3_multiple_tasks_no_errors():
+    """A plan with two task types must complete with zero errors on a healthy server."""
+    scenario_file = _write_scenario("""\
+        from loadpilot.dsl import VUser, scenario, task
+
+        @scenario(rps=5, duration="2s", ramp_up="1s")
+        class MultiTaskFlow(VUser):
+            @task(weight=1)
+            def get_user(self, client):
+                client.get("/user")
+
+            @task(weight=1)
+            def get_health(self, client):
+                client.get("/health")
+    """)
+    with MockServer() as srv:
+        plan = ScenarioPlan(
+            name="MultiTaskFlow",
+            rps=5,
+            duration_secs=2,
+            ramp_up_secs=1,
+            target_url=srv.url,
+            tasks=[
+                TaskPlan(name="get_user", url="/user", method="GET", weight=1),
+                TaskPlan(name="get_health", url="/health", method="GET", weight=1),
+            ],
+            scenario_file=scenario_file,
+            scenario_class="MultiTaskFlow",
+            n_vusers=2,
+        )
+        metrics = _run(plan)
+
+    final = metrics[-1]
+    assert final.requests_total > 0
+    assert final.errors_total == 0
+
+
+@requires_coordinator
+def test_pyo3_metric_invariants():
+    """errors_total must never exceed requests_total in any PyO3 mode snapshot."""
+    scenario_file = _write_scenario("""\
+        from loadpilot.dsl import VUser, scenario, task
+
+        @scenario(rps=5, duration="2s", ramp_up="1s")
+        class InvariantFlow(VUser):
+            @task(weight=1)
+            def ping(self, client):
+                client.get("/ping")
+
+            def check_ping(self, status_code, body):
+                assert status_code == 200
+    """)
+    with MockServer() as srv:
+        plan = _pyo3_plan(srv.url, scenario_file, "InvariantFlow")
+        metrics = _run(plan)
+
+    for m in metrics:
+        assert m.errors_total <= m.requests_total
