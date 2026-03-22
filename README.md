@@ -93,9 +93,9 @@ class CheckoutFlow(VUser):
     def browse(self, client: LoadClient):
         client.get("/api/products", headers=self._auth())
 
-    def check_browse(self, response) -> None:
-        assert response.status_code == 200
-        assert isinstance(response.json(), list)
+    def check_browse(self, status_code: int, body) -> None:
+        assert status_code == 200
+        assert isinstance(body, list)
 
     @task(weight=1)
     def purchase(self, client: LoadClient):
@@ -104,9 +104,9 @@ class CheckoutFlow(VUser):
             headers=self._auth(),
         )
 
-    def check_purchase(self, response) -> None:
-        assert response.status_code in (200, 201)
-        assert "id" in response.json()
+    def check_purchase(self, status_code: int, body) -> None:
+        assert status_code in (200, 201)
+        assert "id" in body
 
     def _auth(self):
         return {"Authorization": f"Bearer {self.token}"}
@@ -121,12 +121,12 @@ def checkout(self, client: LoadClient):
     item_id = cart.json()["items"][0]["id"]
     client.post("/orders", json={"item_id": item_id, "qty": 1}, headers=self._auth())
 
-def check_checkout(self, response) -> None:
-    assert response.status_code in (200, 201)
+def check_checkout(self, status_code: int, body) -> None:
+    assert status_code in (200, 201)
 ```
 
 Each HTTP call inside a task is measured independently. `check_checkout` receives
-the response from the last call.
+the status code and parsed JSON body of the last call.
 
 ### Multiple scenarios in one file
 
@@ -188,7 +188,7 @@ All profiles work in distributed mode.
 |---------------------------|------|--------|-------------|
 | `on_start(self, client)`  | Once per VUser, before tasks | Real HTTP (httpx) | ✅ pre-auth pool |
 | `on_stop(self, client)`   | Once per VUser, after test   | Real HTTP (httpx) | ❌ skipped |
-| `check_{task}(self, resp)`| After each task's last HTTP response | — | ❌ status-based only |
+| `check_{task}(self, status_code, body)`| After each task's last HTTP response | — | ❌ status-based only |
 
 Tasks can be `async def` — LoadPilot drives them via a `coro.send(None)` fast path
 with automatic fallback to `asyncio.run_until_complete` for tasks with real `await`.
@@ -234,7 +234,7 @@ def fetch_profile(self, client: LoadClient):
 Each dict accepts the same keys as the per-method helpers: `method`, `path`,
 `headers`, `json`, `data`. `method` defaults to `"GET"`.
 
-Benchmark result at batch size 5: **3170 RPS** (91% of static-mode ceiling, +42%
+Benchmark result at batch size 5: **3355 RPS** (96% of static-mode ceiling, +45%
 vs sequential tasks). Useful when each request has non-trivial latency — N
 concurrent requests complete in `max(latency_i)` instead of `sum(latency_i)`.
 
@@ -487,13 +487,13 @@ Python/GIL scheduler adds significant latency even at moderate load.
 
 ### Max throughput — 30s constant, no artificial cap
 
-| Tool | RPS | p50 | p99 | Errors |
-|------|-----|-----|-----|--------|
-| **LoadPilot** | **3494** | 18ms | 430ms | 0% |
-| k6 | 1638 | 22ms | 187ms | 0% |
-| Locust | 697 | 99ms | 190ms | 0% |
+| Tool | RPS | p50 | p99 | Errors | CPU avg | Mem peak |
+|------|-----|-----|-----|--------|---------|----------|
+| **LoadPilot (PyO3)** | **2205** | 11ms | 38ms | 0% | **165%** | 105 MB |
+| k6 | 1799 | 14ms | 175ms | 0% | 212% | 107 MB |
+| Locust | 677 | 100ms | 170ms | 0% | 117% | 50 MB |
 
-LoadPilot delivers **2.1× k6** and **5.0× Locust** at max throughput with zero errors.
+LoadPilot runs in PyO3 mode with `on_start` + `check_*` (full Python callbacks). It delivers **1.2× k6** and **3.3× Locust** at max throughput. Per CPU core: LoadPilot 13.4 RPS/% vs k6 8.5 RPS/% — **1.6× better CPU efficiency per request**.
 
 ### PyO3 mode — architecture comparison (500 RPS target)
 
@@ -520,18 +520,23 @@ experiments on Python 3.12 (GIL), Docker bridge network.
 
 | Approach | HTTP RPS | p50 | p99 | Notes |
 |---|---|---|---|---|
-| `asyncio.run_until_complete` | 1591 | — | — | baseline |
+| `asyncio.run_until_complete` | 1591 | — | — | historical baseline |
 | `asyncio.run_coroutine_threadsafe` | 731 | — | — | −54% — OS pipe wakeup overhead |
-| sync `def` task | 2139 | — | — | no asyncio overhead |
-| `coro.send(None)` fast path | 2226 | 12ms | 39ms | +40% vs baseline |
+| `coro.send(None)` fast path | 2289 | 11ms | 37ms | current async task impl |
+| sync `def` task | 2487 | 22ms | 67ms | no asyncio overhead |
+| async task + `check_*` | 2205 | 11ms | 38ms | `check_*(self, status_code, body)` |
 | `asyncio.gather(5)` | 1450 | 13ms | 28ms | `call_soon_threadsafe` × 5 negates gain |
-| **`client.batch(5)`** | **3170** | **6ms** | **15ms** | **+42% vs fast path** |
-| Static ceiling (no Python) | 3494 | 18ms | 430ms | reference |
+| **`client.batch(5)`** | **3385** | **14ms** | **34ms** | **pure Rust JoinSet** |
+| Static ceiling (no Python) | 3494 | 18ms | 537ms | reference |
 
 `client.batch(N)` dispatches N HTTP requests concurrently inside a single Rust
 `block_on` with `py.detach()` — the GIL is released for the entire batch. PyO3
 overhead is paid once per N requests rather than once per request. At batch
-size 5 this reaches **91% of static mode**.
+size 5 this reaches **97% of static mode**.
+
+`check_*(self, status_code, body)` adds only ~4% overhead vs async task without
+checks — JSON is pre-parsed in `py.detach()` and the check method receives plain
+Python primitives, not a wrapper object.
 
 `coro.send(None)` fast path drives sync-body `async def` without the asyncio
 scheduler — ~10µs vs ~200µs per coroutine. Falls back to `run_until_complete`
@@ -568,7 +573,7 @@ individual request latency is high (>100ms) and N is large.
 | v0.6 | Benchmark — LoadPilot vs Locust vs k6, published results | ✅ done |
 | v0.6 | PyO3 persistent threads — one OS thread per VUser, GIL released during I/O | ✅ done |
 | v0.6 | `async def` task support — `coro.send(None)` fast path | ✅ done |
-| v0.6 | `client.batch()` — N concurrent HTTP, one PyO3 call, 91% of static ceiling | ✅ done |
+| v0.6 | `client.batch()` — N concurrent HTTP, one PyO3 call, 97% of static ceiling | ✅ done |
 | v0.6 | GitHub Releases + verify install.sh end-to-end | planned |
 | v1.0 | Production hardening | planned |
 

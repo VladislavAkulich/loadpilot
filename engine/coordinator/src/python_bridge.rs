@@ -27,11 +27,23 @@ pub struct RustResponse {
     #[pyo3(get)]
     pub text: String,
     headers_map: HashMap<String, String>,
+    /// Pre-built Python object from `json_to_py`, populated eagerly in
+    /// `do_request`/`do_batch` right after `py.detach()` exits (GIL held, but
+    /// as part of the existing post-HTTP window — no extra serialisation).
+    /// Calling `response.json()` from `check_*` then becomes a `clone_ref`
+    /// (~1 ns) instead of `serde_json::from_str + json_to_py` (hundreds of µs
+    /// per call × N VUser threads competing for the GIL).
+    json_cache: Option<Py<PyAny>>,
 }
 
 #[pymethods]
 impl RustResponse {
     fn json(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        // Fast path: return the pre-built Python object (eager-cached in do_request).
+        if let Some(ref cached) = self.json_cache {
+            return Ok(cached.clone_ref(py));
+        }
+        // Fallback: parse on demand (e.g. RustResponse constructed in tests).
         let value: serde_json::Value = serde_json::from_str(&self.text).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("JSON decode error: {}", e))
         })?;
@@ -141,7 +153,11 @@ impl RustClient {
                         })
                         .collect();
                     let body_text = resp.text().await.unwrap_or_default();
-                    Ok((status, resp_headers, body_text))
+                    // Parse JSON while the GIL is still released — serde_json is
+                    // pure Rust and needs no Python runtime. The resulting Value
+                    // is converted to a Py<PyAny> after py.detach() exits below.
+                    let json_parsed = parse_json_body(&body_text);
+                    Ok((status, resp_headers, body_text, json_parsed))
                 }
                 Err(e) => Err(e.to_string()),
             }
@@ -150,8 +166,14 @@ impl RustClient {
         let elapsed_ms = t0.elapsed().as_millis() as u64;
 
         match http_result {
-            Ok((status, resp_headers, body_text)) => {
+            Ok((status, resp_headers, body_text, json_parsed)) => {
                 self.calls.push((elapsed_ms, status));
+                // GIL is re-acquired here. Convert the pre-parsed JSON Value to a
+                // Python object now, in the same post-HTTP GIL window used to create
+                // RustResponse. This amortises json_to_py so that check_* calling
+                // response.json() needs only a clone_ref (~1 ns) instead of
+                // parsing + json_to_py under GIL contention.
+                let json_cache = json_parsed.as_ref().and_then(|v| json_to_py(py, v).ok());
                 let response = Py::new(
                     py,
                     RustResponse {
@@ -159,6 +181,7 @@ impl RustClient {
                         ok: status < 400,
                         text: body_text,
                         headers_map: resp_headers,
+                        json_cache,
                     },
                 )?;
                 self.last_response = Some(response.clone_ref(py));
@@ -266,7 +289,7 @@ impl RustClient {
         let client = self.http_client.clone();
         let handle = self.rt_handle.clone();
 
-        type HttpOutcome = Result<(u64, u16, HashMap<String, String>, String), (u64, String)>;
+        type HttpOutcome = Result<(u64, u16, HashMap<String, String>, String, Option<serde_json::Value>), (u64, String)>;
 
         // Release the GIL for all concurrent HTTP. All captured values are Send
         // Rust types — no Python objects cross the py.detach boundary.
@@ -310,8 +333,9 @@ impl RustClient {
                                     })
                                     .collect();
                                 let body_text = resp.text().await.unwrap_or_default();
+                                let json_parsed = parse_json_body(&body_text);
                                 let ms = t0.elapsed().as_millis() as u64;
-                                Ok((ms, status, resp_headers, body_text))
+                                Ok((ms, status, resp_headers, body_text, json_parsed))
                             }
                             Err(e) => {
                                 let ms = t0.elapsed().as_millis() as u64;
@@ -332,8 +356,9 @@ impl RustClient {
         let mut responses = Vec::new();
         for outcome in outcomes {
             match outcome {
-                Ok((elapsed_ms, status, resp_headers, body_text)) => {
+                Ok((elapsed_ms, status, resp_headers, body_text, json_parsed)) => {
                     self.calls.push((elapsed_ms, status));
+                    let json_cache = json_parsed.as_ref().and_then(|v| json_to_py(py, v).ok());
                     let resp = Py::new(
                         py,
                         RustResponse {
@@ -341,6 +366,7 @@ impl RustClient {
                             ok: status < 400,
                             text: body_text,
                             headers_map: resp_headers,
+                            json_cache,
                         },
                     )?;
                     self.last_response = Some(resp.clone_ref(py));
@@ -695,13 +721,24 @@ fn do_run_task(
 
     let rc = rust_client.borrow(py);
     let calls_data = rc.calls.clone();
-    let last_resp = rc.last_response.as_ref().map(|r| r.clone_ref(py));
+    // Extract the data check_* needs as plain Python primitives — no PyO3 wrapper
+    // objects, no descriptor-protocol overhead. check_*(self, status_code, body)
+    // receives a Python int and a pre-built dict (or None), so the only Python
+    // work left inside check_* is native comparisons and dict lookups.
+    let last_status: Option<u16> = rc.last_response.as_ref()
+        .map(|r| r.borrow(py).status_code);
+    let last_json: Option<Py<PyAny>> = rc.last_response.as_ref()
+        .and_then(|r| r.borrow(py).json_cache.as_ref().map(|j| j.clone_ref(py)));
     drop(rc);
 
     let check_name = format!("check_{}", task_name);
     let check_failed = if vuser.hasattr(check_name.as_str()).unwrap_or(false) {
-        if let Some(resp) = last_resp {
-            match vuser.call_method1(check_name.as_str(), (resp,)) {
+        if let Some(status) = last_status {
+            let status_py = status
+                .into_pyobject(py)
+                .map_err(|e| anyhow!("status into_pyobject: {}", e))?;
+            let body_py: Py<PyAny> = last_json.unwrap_or_else(|| py.None());
+            match vuser.call_method1(check_name.as_str(), (status_py, body_py)) {
                 Ok(_) => false,
                 Err(e) => {
                     eprintln!("[loadpilot] check_{} failed: {}", task_name, e);
@@ -827,6 +864,17 @@ fn urlencoded_str(s: &str) -> String {
             c => format!("%{:02X}", c as u32).chars().collect::<Vec<_>>(),
         })
         .collect()
+}
+
+/// Parse a response body as JSON if it looks like an object or array.
+/// Called inside `py.detach()` — pure Rust, no GIL needed.
+fn parse_json_body(body: &str) -> Option<serde_json::Value> {
+    let trimmed = body.trim_start();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        serde_json::from_str(body).ok()
+    } else {
+        None
+    }
 }
 
 fn json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<PyAny>> {
@@ -1047,6 +1095,7 @@ mod tests {
                     ok: true,
                     text: r#"{"id":1,"name":"bench"}"#.to_string(),
                     headers_map: HashMap::new(),
+                    json_cache: None,
                 },
             )
             .unwrap();
@@ -1067,6 +1116,7 @@ mod tests {
                     ok: true,
                     text: "not json".to_string(),
                     headers_map: HashMap::new(),
+                    json_cache: None,
                 },
             )
             .unwrap();
@@ -1084,6 +1134,7 @@ mod tests {
                     ok: true,
                     text: String::new(),
                     headers_map: HashMap::new(),
+                    json_cache: None,
                 },
             )
             .unwrap();
@@ -1101,6 +1152,7 @@ mod tests {
                     ok: false,
                     text: String::new(),
                     headers_map: HashMap::new(),
+                    json_cache: None,
                 },
             )
             .unwrap();

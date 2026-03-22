@@ -20,7 +20,25 @@ run() {
     local profile="$1"
     local label="$2"
     echo "  → $label"
-    docker compose --profile "$profile" run --rm "$profile"
+
+    # Run the container in the background (foreground mode, auto-removed on exit).
+    docker compose --profile "$profile" run --rm "$profile" &
+    local run_pid=$!
+
+    # Give the container a moment to appear in `docker ps`, then find it by
+    # the compose service label and start the resource sampler.
+    sleep 2
+    local cid
+    cid=$(docker ps --filter "label=com.docker.compose.service=$profile" --format "{{.ID}}" | head -1)
+    if [ -n "$cid" ]; then
+        python3 collect_stats.py "$cid" "results/resources_${profile}.json" &
+        local stats_pid=$!
+    fi
+
+    wait "$run_pid"
+    if [ -n "${stats_pid:-}" ]; then
+        wait "$stats_pid" 2>/dev/null || true
+    fi
 }
 
 cooldown() {

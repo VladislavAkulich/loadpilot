@@ -313,9 +313,9 @@ def test_pyo3_passing_check_counts_as_success():
             def ping(self, client):
                 client.get("/ping")
 
-            def check_ping(self, response):
-                assert response.status_code == 200
-                assert response.json()["status"] == "ok"
+            def check_ping(self, status_code, body):
+                assert status_code == 200
+                assert body["status"] == "ok"
     """)
     with MockServer() as srv:
         plan = _pyo3_plan(srv.url, scenario_file, "CheckPassFlow")
@@ -338,8 +338,8 @@ def test_pyo3_failing_check_counts_as_error():
             def ping(self, client):
                 client.get("/ping")
 
-            def check_ping(self, response):
-                assert response.status_code == 999  # always fails
+            def check_ping(self, status_code, body):
+                assert status_code == 999  # always fails
     """)
     with MockServer() as srv:
         plan = _pyo3_plan(srv.url, scenario_file, "CheckFailFlow")
@@ -366,9 +366,9 @@ def test_pyo3_on_start_runs_before_tasks():
             def ping(self, client):
                 client.get("/ping")
 
-            def check_ping(self, response):
+            def check_ping(self, status_code, body):
                 assert self.ready is True
-                assert response.status_code == 200
+                assert status_code == 200
     """)
     with MockServer() as srv:
         plan = _pyo3_plan(srv.url, scenario_file, "StateFlow")
@@ -391,11 +391,10 @@ def test_pyo3_check_receives_real_response_body():
             def ping(self, client):
                 client.get("/ping")
 
-            def check_ping(self, response):
+            def check_ping(self, status_code, body):
                 # The mock server returns {"status":"ok","id":1}
-                data = response.json()
-                assert "status" in data
-                assert data["id"] == 1
+                assert "status" in body
+                assert body["id"] == 1
     """)
     with MockServer() as srv:
         plan = _pyo3_plan(srv.url, scenario_file, "BodyCheckFlow")

@@ -26,6 +26,6 @@ class PyO3Full(VUser):
     async def get_user(self, client: LoadClient):
         client.get("/api/user", headers={"Authorization": f"Bearer {self.token}"})
 
-    def check_get_user(self, response) -> None:
-        assert response.status_code == 200
-        assert response.json()["id"] == 1
+    def check_get_user(self, status_code: int, body) -> None:
+        assert status_code == 200
+        assert body["id"] == 1
