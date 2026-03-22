@@ -1,6 +1,7 @@
 ---
 title: Getting Started
 nav_order: 2
+layout: default
 ---
 
 # Getting started in 5 minutes

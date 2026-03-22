@@ -1,6 +1,7 @@
 ---
 title: Distributed Mode
 nav_order: 5
+layout: default
 ---
 
 # Distributed Mode

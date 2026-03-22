@@ -1,6 +1,7 @@
 ---
 title: Development
 nav_order: 8
+layout: default
 ---
 
 # Development

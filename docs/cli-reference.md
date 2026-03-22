@@ -1,6 +1,7 @@
 ---
 title: CLI Reference
 nav_order: 4
+layout: default
 ---
 
 # CLI Reference
