@@ -452,6 +452,18 @@ def run_command(
             raise typer.Exit(0)
         scenario_file, scenario_name = result
 
+        # Prompt for target if it wasn't supplied via --target flag.
+        if target == "http://localhost:8000":
+            import questionary
+
+            entered = questionary.text(
+                "Target URL:",
+                default=target,
+            ).ask()
+            if not entered:
+                raise typer.Exit(0)
+            target = entered.strip()
+
     if not scenario_file.exists():
         console.print(f"[red]Error:[/] Scenario file not found: {scenario_file}")
         raise typer.Exit(1)
