@@ -72,8 +72,11 @@ jobs:
         run: |
           cp engine/target/${{ matrix.target }}/release/coordinator cli/loadpilot/coordinator
           chmod +x cli/loadpilot/coordinator
+          # Strip xattrs/code-signature added by macOS — prevents ZIP "Mis-matched data size" error.
+          xattr -cr cli/loadpilot/coordinator 2>/dev/null || true
           cp engine/target/${{ matrix.target }}/release/agent agent-bin
           chmod +x agent-bin
+          xattr -cr agent-bin 2>/dev/null || true
 
       - name: Stage binaries (Windows)
         if: runner.os == 'Windows'
