@@ -22,21 +22,14 @@ jobs:
             wheel_tag: manylinux_2_28_x86_64
             agent_name: agent-linux-x86_64
 
-          # Linux ARM64 (e.g. AWS Graviton, Raspberry Pi 4 64-bit).
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            wheel_tag: manylinux_2_28_aarch64
-            cross: true   # use cross-rs for cross-compilation
-            agent_name: agent-linux-aarch64
-
-          # macOS Intel.
-          - os: macos-13
+          # macOS Intel — cross-compiled from ARM runner (macos-13 is deprecated).
+          - os: macos-latest
             target: x86_64-apple-darwin
             wheel_tag: macosx_13_0_x86_64
             agent_name: agent-darwin-x86_64
 
           # macOS Apple Silicon (M1/M2/M3).
-          - os: macos-14
+          - os: macos-latest
             target: aarch64-apple-darwin
             wheel_tag: macosx_14_0_arm64
             agent_name: agent-darwin-arm64
@@ -56,11 +49,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # ── cross-rs for Linux ARM64 cross-compilation ───────────────────────────
-      - name: Install cross
-        if: matrix.cross == true
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
       # ── Python ───────────────────────────────────────────────────────────────
       - uses: actions/setup-python@v5
         with:
@@ -70,15 +58,9 @@ jobs:
         run: pip install hatchling build
 
       # ── Compile coordinator + agent ──────────────────────────────────────────
-      - name: Build binaries (native)
-        if: matrix.cross != true
+      - name: Build binaries
         working-directory: engine
         run: cargo build --release --package coordinator --package agent --target ${{ matrix.target }}
-
-      - name: Build binaries (cross)
-        if: matrix.cross == true
-        working-directory: engine
-        run: cross build --release --package coordinator --package agent --target ${{ matrix.target }}
 
       # Copy binaries into the Python package so hatchling picks it up.
       - name: Stage binaries (Unix)
