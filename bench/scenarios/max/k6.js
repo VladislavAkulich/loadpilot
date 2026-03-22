@@ -1,3 +1,6 @@
+// Max throughput: ramp arrival rate from 100 → 10 000 RPS over 10s, hold 20s.
+// k6 will hit its VU/CPU ceiling naturally; the plateau RPS in the report is
+// the tool's actual throughput limit.
 import http from "k6/http";
 
 export const options = {

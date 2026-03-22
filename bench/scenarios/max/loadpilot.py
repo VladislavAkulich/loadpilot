@@ -1,8 +1,9 @@
 from loadpilot import VUser, scenario, task, LoadClient
 
 
-# Step profile: 5 steps from 0 to 3000 RPS over 30s.
-# Finds the natural ceiling — errors appear when throughput is saturated.
+# Max throughput: constant 3500 RPS for 30s (well above the expected ceiling).
+# The engine fires as many requests as it can; the actual RPS in the report
+# reflects the tool's true throughput ceiling on this machine.
 @scenario(rps=3_500, duration="30s", mode="constant")
 class MaxBench(VUser):
     @task()

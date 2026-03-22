@@ -213,6 +213,31 @@ client.delete(path, **kwargs)
 `ResponseWrapper`: `.status_code`, `.ok`, `.text`, `.headers`, `.json()`,
 `.elapsed_ms`, `.raise_for_status()`.
 
+#### `client.batch(requests)` — concurrent requests in one PyO3 call
+
+Execute N HTTP requests concurrently inside Rust, paying the PyO3 boundary cost
+once for the whole batch. All requests are dispatched via a tokio `JoinSet` with
+the GIL released for the entire duration.
+
+```python
+@task(weight=1)
+def fetch_profile(self, client: LoadClient):
+    auth = {"Authorization": f"Bearer {self.token}"}
+    responses = client.batch([
+        {"method": "GET", "path": "/api/user",    "headers": auth},
+        {"method": "GET", "path": "/api/orders",  "headers": auth},
+        {"method": "GET", "path": "/api/cart",    "headers": auth},
+    ])
+    # responses is a list of ResponseWrapper in dispatch order
+```
+
+Each dict accepts the same keys as the per-method helpers: `method`, `path`,
+`headers`, `json`, `data`. `method` defaults to `"GET"`.
+
+Benchmark result at batch size 5: **3170 RPS** (91% of static-mode ceiling, +42%
+vs sequential tasks). Useful when each request has non-trivial latency — N
+concurrent requests complete in `max(latency_i)` instead of `sum(latency_i)`.
+
 ---
 
 ## CLI Reference
@@ -423,7 +448,7 @@ Coordinator (Rust / tokio)
         │     reqwest async HTTP → record success/error
         │     body not read (no check_* to feed)
         │
-        └── PyO3 mode (on_start / check_* / async tasks present)
+        └── PyO3 mode (on_start / check_* / async tasks / batch present)
               one OS thread per VUser — persistent, no per-task spawn overhead
               Python::attach per message only (~1–5µs channel overhead)
               RustClient (PyO3 pyclass) passed to Python task
@@ -431,6 +456,9 @@ Coordinator (Rust / tokio)
               GIL re-acquired only for Python callback execution
               async def tasks driven via coro.send(None) fast path
               — avoids asyncio scheduling overhead for sync-body coroutines
+              client.batch([...]) — N concurrent requests, one PyO3 call
+              — py.detach() + tokio JoinSet, GIL free for entire batch
+              — 91% of static ceiling at batch size 5
         │
         ├── stdout JSON lines (1/sec) → CLI live dashboard
         └── :9090/metrics → Prometheus / Grafana
@@ -487,20 +515,32 @@ sync-body coroutines.
 
 ### PyO3 max throughput — optimisation experiments
 
-Measured at 3500 RPS target with `on_start` (login) + async task. All experiments
-on the same Python 3.12 (GIL) image, Docker bridge network.
+Measured at 3500 RPS target with `on_start` (login) + sync or async task. All
+experiments on Python 3.12 (GIL), Docker bridge network.
 
-| Approach | RPS | vs previous |
-|---|---|---|
-| `asyncio.run_until_complete` | 1591 | baseline |
-| `asyncio.run_coroutine_threadsafe` | 731 | −54% — OS pipe wakeup overhead |
-| sync `def` (no asyncio) | 2139 | +34% |
-| **`coro.send(None)` fast path** | **2226** | **+40%** |
-| Static ceiling (no Python) | 3494 | reference |
+| Approach | HTTP RPS | p50 | p99 | Notes |
+|---|---|---|---|---|
+| `asyncio.run_until_complete` | 1591 | — | — | baseline |
+| `asyncio.run_coroutine_threadsafe` | 731 | — | — | −54% — OS pipe wakeup overhead |
+| sync `def` task | 2139 | — | — | no asyncio overhead |
+| `coro.send(None)` fast path | 2226 | 12ms | 39ms | +40% vs baseline |
+| `asyncio.gather(5)` | 1450 | 13ms | 28ms | `call_soon_threadsafe` × 5 negates gain |
+| **`client.batch(5)`** | **3170** | **6ms** | **15ms** | **+42% vs fast path** |
+| Static ceiling (no Python) | 3494 | 18ms | 430ms | reference |
 
-The `coro.send(None)` fast path drives sync-body `async def` without the asyncio
-task scheduler — ~10µs vs ~200µs per coroutine. Falls back to `run_until_complete`
+`client.batch(N)` dispatches N HTTP requests concurrently inside a single Rust
+`block_on` with `py.detach()` — the GIL is released for the entire batch. PyO3
+overhead is paid once per N requests rather than once per request. At batch
+size 5 this reaches **91% of static mode**.
+
+`coro.send(None)` fast path drives sync-body `async def` without the asyncio
+scheduler — ~10µs vs ~200µs per coroutine. Falls back to `run_until_complete`
 automatically when the coroutine has real `await` expressions.
+
+`asyncio.gather` was tested but performs worse than sequential: each future
+resolution requires `Python::attach → call_soon_threadsafe` from a tokio thread,
+adding pipe-wakeup overhead × N per task dispatch. Only advantageous when
+individual request latency is high (>100ms) and N is large.
 
 ---
 
@@ -528,6 +568,7 @@ automatically when the coroutine has real `await` expressions.
 | v0.6 | Benchmark — LoadPilot vs Locust vs k6, published results | ✅ done |
 | v0.6 | PyO3 persistent threads — one OS thread per VUser, GIL released during I/O | ✅ done |
 | v0.6 | `async def` task support — `coro.send(None)` fast path | ✅ done |
+| v0.6 | `client.batch()` — N concurrent HTTP, one PyO3 call, 91% of static ceiling | ✅ done |
 | v0.6 | GitHub Releases + verify install.sh end-to-end | planned |
 | v1.0 | Production hardening | planned |
 

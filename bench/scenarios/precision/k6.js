@@ -1,3 +1,6 @@
+// Precision: constant-arrival-rate at 500 RPS for 30s.
+// k6 pre-allocates VUs and keeps the arrival rate fixed regardless of latency.
+// Measures scheduler accuracy and generator-side latency overhead.
 import http from "k6/http";
 
 export const options = {

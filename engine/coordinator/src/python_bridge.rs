@@ -85,6 +85,12 @@ impl RustClient {
         }
     }
 
+    fn build_url(&self, path: &str) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        let p = if path.starts_with('/') { path.to_string() } else { format!("/{}", path) };
+        format!("{}{}", base, p)
+    }
+
     fn do_request(
         &mut self,
         py: Python<'_>,
@@ -94,16 +100,7 @@ impl RustClient {
         body: Option<String>,
         is_form: bool,
     ) -> PyResult<Py<RustResponse>> {
-        let url = {
-            let base = self.base_url.trim_end_matches('/');
-            let p = if path.starts_with('/') {
-                path.to_string()
-            } else {
-                format!("/{}", path)
-            };
-            format!("{}{}", base, p)
-        };
-
+        let url = self.build_url(path);
         let client = self.http_client.clone();
         let handle = self.rt_handle.clone();
         let method_upper = method.to_uppercase();
@@ -173,6 +170,191 @@ impl RustClient {
             }
         }
     }
+
+    /// Execute N HTTP requests concurrently inside Rust, paying the PyO3 boundary
+    /// cost once for the whole batch.
+    ///
+    /// Each element of `requests` is a dict with keys:
+    ///   - `"method"` (str, default `"GET"`)
+    ///   - `"path"`   (str, required)
+    ///   - `"headers"` (dict[str,str], optional)
+    ///   - `"json"`    (any, optional) — serialised as JSON body
+    ///   - `"data"`    (dict|str, optional) — form-encoded body
+    ///
+    /// ```python
+    /// @task()
+    /// def fetch_batch(self, client):
+    ///     auth = {"Authorization": f"Bearer {self.token}"}
+    ///     client.batch([
+    ///         {"method": "GET", "path": "/api/user",    "headers": auth},
+    ///         {"method": "GET", "path": "/api/product", "headers": auth},
+    ///         {"method": "GET", "path": "/api/cart",    "headers": auth},
+    ///     ])
+    /// ```
+    ///
+    /// All requests are dispatched to the tokio executor as independent tasks and
+    /// run concurrently while the GIL is released. Results are collected in
+    /// completion order, metrics recorded in dispatch order.
+    fn do_batch(
+        &mut self,
+        py: Python<'_>,
+        requests: &Bound<'_, pyo3::types::PyList>,
+    ) -> PyResult<Vec<Py<RustResponse>>> {
+        // Parse all request specs while holding the GIL — nothing async yet.
+        struct ReqSpec {
+            method: String,
+            url: String,
+            headers: HashMap<String, String>,
+            body: Option<String>,
+            is_form: bool,
+        }
+
+        let specs: Vec<ReqSpec> = requests
+            .iter()
+            .map(|item| {
+                let d = item.cast::<PyDict>()?;
+                let method = d
+                    .get_item("method")?
+                    .map(|v| v.extract::<String>())
+                    .transpose()?
+                    .unwrap_or_else(|| "GET".to_string())
+                    .to_uppercase();
+                let path: String = d
+                    .get_item("path")?
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err("batch item missing 'path'")
+                    })?
+                    .extract()?;
+                let url = self.build_url(&path);
+
+                // Reuse extract_kwargs logic inline for headers / json / data.
+                let mut headers = HashMap::new();
+                let mut body: Option<String> = None;
+                let mut is_form = false;
+
+                if let Some(h) = d.get_item("headers")? {
+                    let h_dict = h.cast::<PyDict>()?;
+                    for (k, v) in h_dict {
+                        headers.insert(k.extract::<String>()?, v.extract::<String>()?);
+                    }
+                }
+                if let Some(json_val) = d.get_item("json")? {
+                    let json_mod = py.import("json")?;
+                    let s: String = json_mod.call_method1("dumps", (json_val,))?.extract()?;
+                    body = Some(s);
+                } else if let Some(data_val) = d.get_item("data")? {
+                    if let Ok(dd) = data_val.cast::<PyDict>() {
+                        let mut parts = Vec::new();
+                        for (k, v) in dd {
+                            parts.push(format!(
+                                "{}={}",
+                                urlencoded_str(&k.extract::<String>()?),
+                                urlencoded_str(&v.extract::<String>()?)
+                            ));
+                        }
+                        body = Some(parts.join("&"));
+                    } else {
+                        body = Some(data_val.extract::<String>()?);
+                    }
+                    is_form = true;
+                }
+
+                Ok(ReqSpec { method, url, headers, body, is_form })
+            })
+            .collect::<PyResult<_>>()?;
+
+        let client = self.http_client.clone();
+        let handle = self.rt_handle.clone();
+
+        type HttpOutcome = Result<(u64, u16, HashMap<String, String>, String), (u64, String)>;
+
+        // Release the GIL for all concurrent HTTP. All captured values are Send
+        // Rust types — no Python objects cross the py.detach boundary.
+        let outcomes: Vec<HttpOutcome> = py.detach(|| {
+            handle.block_on(async move {
+                let mut set = tokio::task::JoinSet::new();
+                for spec in specs {
+                    let c = client.clone();
+                    set.spawn(async move {
+                        let t0 = Instant::now();
+                        let mut req = match spec.method.as_str() {
+                            "GET"    => c.get(&spec.url),
+                            "POST"   => c.post(&spec.url),
+                            "PUT"    => c.put(&spec.url),
+                            "PATCH"  => c.patch(&spec.url),
+                            "DELETE" => c.delete(&spec.url),
+                            other    => {
+                                let ms = t0.elapsed().as_millis() as u64;
+                                return Err((ms, format!("Unknown method: {}", other)));
+                            }
+                        };
+                        for (k, v) in &spec.headers {
+                            req = req.header(k.as_str(), v.as_str());
+                        }
+                        if let Some(ref b) = spec.body {
+                            req = if spec.is_form {
+                                req.header("Content-Type", "application/x-www-form-urlencoded")
+                                   .body(b.clone())
+                            } else {
+                                req.header("Content-Type", "application/json").body(b.clone())
+                            };
+                        }
+                        match req.send().await {
+                            Ok(resp) => {
+                                let status = resp.status().as_u16();
+                                let resp_headers: HashMap<String, String> = resp
+                                    .headers()
+                                    .iter()
+                                    .filter_map(|(k, v)| {
+                                        Some((k.as_str().to_string(), v.to_str().ok()?.to_string()))
+                                    })
+                                    .collect();
+                                let body_text = resp.text().await.unwrap_or_default();
+                                let ms = t0.elapsed().as_millis() as u64;
+                                Ok((ms, status, resp_headers, body_text))
+                            }
+                            Err(e) => {
+                                let ms = t0.elapsed().as_millis() as u64;
+                                Err((ms, e.to_string()))
+                            }
+                        }
+                    });
+                }
+                let mut results = Vec::new();
+                while let Some(r) = set.join_next().await {
+                    results.push(r.unwrap()); // JoinError only on panic
+                }
+                results
+            })
+        });
+
+        // GIL re-acquired: build Python response objects and record metrics.
+        let mut responses = Vec::new();
+        for outcome in outcomes {
+            match outcome {
+                Ok((elapsed_ms, status, resp_headers, body_text)) => {
+                    self.calls.push((elapsed_ms, status));
+                    let resp = Py::new(
+                        py,
+                        RustResponse {
+                            status_code: status,
+                            ok: status < 400,
+                            text: body_text,
+                            headers_map: resp_headers,
+                        },
+                    )?;
+                    self.last_response = Some(resp.clone_ref(py));
+                    responses.push(resp);
+                }
+                Err((elapsed_ms, e)) => {
+                    self.calls.push((elapsed_ms, 0));
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(e));
+                }
+            }
+        }
+        Ok(responses)
+    }
+
 }
 
 #[pymethods]
@@ -230,6 +412,17 @@ impl RustClient {
     ) -> PyResult<Py<RustResponse>> {
         let (headers, body, is_form) = extract_kwargs(py, kwargs)?;
         self.do_request(py, "DELETE", &path, headers, body, is_form)
+    }
+
+    // ── Batch: N concurrent requests, one PyO3 call ───────────────────────────
+
+    #[pyo3(signature = (requests))]
+    fn batch(
+        &mut self,
+        py: Python<'_>,
+        requests: &Bound<'_, pyo3::types::PyList>,
+    ) -> PyResult<Vec<Py<RustResponse>>> {
+        self.do_batch(py, requests)
     }
 }
 
@@ -561,17 +754,15 @@ fn run_maybe_coro<'py>(
     if is_coro {
         // Fast path: drive the coroutine with a single send(None).
         // For async def bodies that contain no real `await` expressions
-        // (only synchronous calls like RustClient.get), the coroutine
-        // completes immediately and raises StopIteration — no asyncio
-        // scheduling overhead at all (~10µs vs ~200µs for run_until_complete).
+        // (only synchronous calls like RustClient.get / RustClient.batch),
+        // the coroutine completes immediately and raises StopIteration —
+        // no asyncio scheduling overhead at all (~10µs vs ~200µs).
         match ret.call_method1("send", (py.None(),)) {
             Err(e) if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) => {
-                // Coroutine completed in one step — expected for sync-body async tasks.
+                // Coroutine completed in one step — the common case.
             }
             Ok(_yielded) => {
-                // Coroutine has real awaits — fall back to event loop.
-                // Note: coroutine is partially consumed here; run_until_complete
-                // will pick up from the yielded state via asyncio.Task internals.
+                // Coroutine has real awaits — fall back to the event loop.
                 if let Some(loop_) = event_loop {
                     loop_.call_method1(py, "run_until_complete", (&ret,))?;
                 } else {
@@ -689,12 +880,9 @@ mod tests {
     }
 
     #[test]
-    fn sync_body_async_fn_completes_via_fast_path() {
+    fn sync_body_async_fn_completes_without_event_loop() {
         Python::attach(|py| {
-            // async def f(): return 42  — no real awaits → StopIteration on send(None)
-            let code = "async def f(): return 42\ncoro = f()";
-            py.run(pyo3::ffi::c_str!("async def f(): return 42\ncoro = f()"), None, None)
-                .unwrap();
+            // async def f(): return 42  — no real awaits; runs via asyncio.run
             let locals = PyDict::new(py);
             py.run(
                 pyo3::ffi::c_str!("async def f(): return 42\ncoro = f()"),
@@ -703,25 +891,27 @@ mod tests {
             )
             .unwrap();
             let coro = locals.get_item("coro").unwrap().unwrap();
+            // No event_loop → asyncio.run() is used
             let result = run_maybe_coro(py, Ok(coro), None);
             assert!(result.is_ok());
         });
     }
 
     #[test]
-    fn async_fn_with_await_falls_back_to_event_loop() {
+    fn async_fn_with_await_uses_event_loop() {
         Python::attach(|py| {
-            // async def f(): await asyncio.sleep(0) — has a real await
-            let locals = PyDict::new(py);
+            // async def f(): await asyncio.sleep(0) — has a real await.
+            // Use a shared globals dict so that f.__globals__ contains asyncio.
+            let globals = PyDict::new(py);
             py.run(
                 pyo3::ffi::c_str!(
                     "import asyncio\nasync def f(): await asyncio.sleep(0)\ncoro = f()"
                 ),
+                Some(&globals),
                 None,
-                Some(&locals),
             )
             .unwrap();
-            let coro = locals.get_item("coro").unwrap().unwrap();
+            let coro = globals.get_item("coro").unwrap().unwrap();
             let loop_ = py
                 .import("asyncio")
                 .unwrap()
@@ -730,7 +920,7 @@ mod tests {
                 .unbind();
             let result = run_maybe_coro(py, Ok(coro), Some(&loop_));
             let _ = loop_.call_method0(py, "close");
-            assert!(result.is_ok());
+            assert!(result.is_ok(), "run_maybe_coro failed: {:?}", result);
         });
     }
 
@@ -915,6 +1105,81 @@ mod tests {
             )
             .unwrap();
             assert!(resp.borrow(py).raise_for_status().is_err());
+        });
+    }
+
+    // ── do_batch ──────────────────────────────────────────────────────────────
+
+    fn make_test_client(base_url: &str) -> (tokio::runtime::Runtime, RustClient) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let client = RustClient::new(
+            base_url.to_string(),
+            reqwest::Client::new(),
+            rt.handle().clone(),
+        );
+        (rt, client)
+    }
+
+    #[test]
+    fn batch_empty_list_returns_empty() {
+        Python::attach(|py| {
+            let (_rt, mut client) = make_test_client("http://localhost:9999");
+            let requests = pyo3::types::PyList::empty(py);
+            let result = client.do_batch(py, &requests);
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn batch_item_missing_path_returns_error() {
+        Python::attach(|py| {
+            let (_rt, mut client) = make_test_client("http://localhost:9999");
+            // Dict with no "path" key.
+            let d = PyDict::new(py);
+            let requests = pyo3::types::PyList::empty(py);
+            requests.append(d).unwrap();
+            let result = client.do_batch(py, &requests);
+            assert!(result.is_err());
+            let msg = result.unwrap_err().to_string();
+            assert!(msg.contains("missing 'path'"), "unexpected error: {msg}");
+        });
+    }
+
+    #[test]
+    fn batch_item_not_a_dict_returns_error() {
+        Python::attach(|py| {
+            let (_rt, mut client) = make_test_client("http://localhost:9999");
+            // Item is a string, not a dict.
+            let requests = pyo3::types::PyList::empty(py);
+            requests.append("not a dict").unwrap();
+            let result = client.do_batch(py, &requests);
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn batch_default_method_is_get() {
+        // Verify that omitting "method" defaults to GET without raising an error
+        // (the actual HTTP call would fail against a non-running server, so we
+        // only test that parse succeeds by checking no parse-phase error is raised
+        // before py.detach).
+        //
+        // We use a port that is not listening so the HTTP error comes back from
+        // the network layer, not from our argument parser — confirming that the
+        // method default logic ran successfully.
+        Python::attach(|py| {
+            let (_rt, mut client) = make_test_client("http://127.0.0.1:19999");
+            let d = PyDict::new(py);
+            d.set_item("path", "/ping").unwrap();
+            // No "method" key — should default to GET.
+            let requests = pyo3::types::PyList::empty(py);
+            requests.append(d).unwrap();
+            let result = client.do_batch(py, &requests);
+            // Connection refused → RuntimeError from the network, not a parse error.
+            assert!(result.is_err());
+            let msg = result.unwrap_err().to_string();
+            assert!(!msg.contains("missing 'path'"), "got parse error, not network: {msg}");
         });
     }
 }

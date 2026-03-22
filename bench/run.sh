@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Run the full benchmark suite:
-#   - Precision: all tools target 500 RPS → measures accuracy & latency overhead
-#   - Max throughput: each tool runs flat-out → measures ceiling
+# Run the full benchmark suite.
+#
+# Precision (500 RPS):  LoadPilot static, k6, Locust, LoadPilot PyO3 x2
+# Max throughput:       LoadPilot static, k6, Locust, LoadPilot PyO3 x4
 #
 # Tools run sequentially; target server stays up throughout.
 #
@@ -30,13 +31,6 @@ cooldown() {
 echo "=== LoadPilot Benchmark ==="
 echo
 
-# Coordinator binary must exist before building the Docker image.
-COORDINATOR=../engine/target/release/coordinator
-if [ ! -f "$COORDINATOR" ]; then
-    echo "Building coordinator..."
-    (cd ../engine && cargo build --release -p coordinator)
-fi
-
 echo "[1/4] Building images..."
 docker compose build
 echo
@@ -46,37 +40,29 @@ docker compose up -d --wait target
 echo "  target ready"
 echo
 
-# ── Precision (500 RPS) ────────────────────────────────────────────────────────
-echo "[3/4] Precision scenario (target: 500 RPS, 30s)"
+# ── Precision (500 RPS) ───────────────────────────────────────────────────────
+echo "[3/4] Precision (target: 500 RPS, 30s)"
 
-run loadpilot-precision "LoadPilot"  ; cooldown
-run locust-precision    "Locust"     ; cooldown
-run k6-precision        "k6"
+run loadpilot-precision   "LoadPilot static"      ; cooldown
+run locust-precision      "Locust"                ; cooldown
+run k6-precision          "k6"                    ; cooldown
+run loadpilot-pyo3-onstart "LoadPilot PyO3 on_start" ; cooldown
+run loadpilot-pyo3-full   "LoadPilot PyO3 full"
 echo
 
-# ── Max throughput ─────────────────────────────────────────────────────────────
-echo "[3/4] Max throughput scenario (30s, no RPS cap)"
+# ── Max throughput ────────────────────────────────────────────────────────────
+echo "[3/4] Max throughput (30s, no RPS cap)"
 
-run loadpilot-max "LoadPilot" ; cooldown
-run locust-max    "Locust"    ; cooldown
-run k6-max        "k6"
-echo
-
-# ── PyO3 mode (LoadPilot only, persistent threads + GIL Python 3.12) ─────────
-echo "[3/4] PyO3 — 500 RPS, on_start only"
-run loadpilot-pyo3-onstart "LoadPilot PyO3 on_start (500 RPS)" ; cooldown
-
-echo "[3/4] PyO3 — 500 RPS, on_start + check_*"
-run loadpilot-pyo3-full "LoadPilot PyO3 full (500 RPS)" ; cooldown
-
-echo "[3/4] PyO3 — max throughput, on_start only"
+run loadpilot-max         "LoadPilot static"      ; cooldown
+run locust-max            "Locust"                ; cooldown
+run k6-max                "k6"                    ; cooldown
 run loadpilot-pyo3-max-onstart "LoadPilot PyO3 on_start (max)" ; cooldown
-
-echo "[3/4] PyO3 — max throughput, on_start + check_*"
-run loadpilot-pyo3-max-full "LoadPilot PyO3 full (max)"
+run loadpilot-pyo3-max-full   "LoadPilot PyO3 full (max)"     ; cooldown
+run loadpilot-pyo3-max-sync   "LoadPilot PyO3 sync (max)"     ; cooldown
+run loadpilot-pyo3-batch5     "LoadPilot PyO3 batch×5"
 echo
 
-# ── Report ─────────────────────────────────────────────────────────────────────
+# ── Report ────────────────────────────────────────────────────────────────────
 echo "[4/4] Generating report..."
 python3 report.py
 echo
