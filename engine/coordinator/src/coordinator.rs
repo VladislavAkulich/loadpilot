@@ -70,7 +70,7 @@ impl Coordinator {
         let metrics = self.metrics;
 
         let start = Instant::now();
-        let ramp_up = Duration::from_secs(plan.ramp_up_secs);
+        let _ramp_up = Duration::from_secs(plan.ramp_up_secs);
         // For ramp mode, total = steady duration + ramp-up window.
         // For all other modes, ramp_up_secs is unused and total = duration_secs.
         let total = match plan.mode {
@@ -132,15 +132,9 @@ impl Coordinator {
             tokio::spawn(async move {
                 for i in 0..n {
                     let b_clone = Arc::clone(&b);
-                    let result = tokio::task::spawn_blocking(move || {
-                        b_clone.call_on_start(i)
-                    })
-                    .await;
-
-                    match result {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => eprintln!("[loadpilot] on_start[{}] error: {}", i, e),
-                        Err(e) => eprintln!("[loadpilot] on_start[{}] panic: {}", i, e),
+                    match b_clone.call_on_start(i).await {
+                        Ok(()) => {}
+                        Err(e) => eprintln!("[loadpilot] on_start[{}] error: {}", i, e),
                     }
 
                     ready.fetch_add(1, Ordering::Release);
@@ -264,15 +258,8 @@ impl Coordinator {
                         };
                         active_clone2.fetch_add(1, Ordering::Relaxed);
 
-                        let b_run = Arc::clone(&b);
-                        let task_name_r = task_name.clone();
-                        let run_result = tokio::task::spawn_blocking(move || {
-                            b_run.run_task(vuser_idx, &task_name_r)
-                        })
-                        .await;
-
-                        match run_result {
-                            Ok(Ok(calls)) => {
+                        match b.run_task(vuser_idx, task_name.clone()).await {
+                            Ok(calls) => {
                                 if calls.is_empty() {
                                     metrics_task.record_error(0);
                                 } else {
@@ -288,12 +275,8 @@ impl Coordinator {
                                     }
                                 }
                             }
-                            Ok(Err(e)) => {
-                                eprintln!("[loadpilot] run_task error: {}", e);
-                                metrics_task.record_error(0);
-                            }
                             Err(e) => {
-                                eprintln!("[loadpilot] spawn_blocking panic: {}", e);
+                                eprintln!("[loadpilot] run_task error: {}", e);
                                 metrics_task.record_error(0);
                             }
                         }
@@ -333,16 +316,15 @@ impl Coordinator {
         done_flag.store(true, Ordering::Relaxed);
         sleep(Duration::from_millis(1200)).await;
 
-        // Call on_stop for all VUsers.
+        // Call on_stop for all VUsers, then signal threads to exit.
         if let Some(ref b) = bridge {
             let n = b.n_vusers();
             for i in 0..n {
-                let b_clone = Arc::clone(b);
-                let _ = tokio::task::spawn_blocking(move || {
-                    b_clone.call_on_stop(i)
-                })
-                .await;
+                if let Err(e) = b.call_on_stop(i).await {
+                    eprintln!("[loadpilot] on_stop[{}] error: {}", i, e);
+                }
             }
+            b.shutdown();
         }
 
         // Final "done" metrics snapshot.
@@ -443,7 +425,9 @@ fn pick_task<'a>(tasks: &'a [TaskPlan], index: usize) -> &'a TaskPlan {
 /// Response data returned from a live HTTP request.
 struct HttpResponse {
     status: u16,
+    #[allow(dead_code)]
     headers: std::collections::HashMap<String, String>,
+    #[allow(dead_code)]
     body: String,
 }
 

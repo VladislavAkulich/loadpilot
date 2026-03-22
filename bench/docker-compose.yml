@@ -111,12 +111,12 @@ services:
     profiles: ["k6-max"]
     command: run --summary-export /results/max_k6.json /scenarios/max/k6.js
 
-  # ── PyO3 mode (on_start only) ──────────────────────────────────────────────
+  # ── PyO3 mode — persistent threads, GIL Python 3.12 (on_start only) ─────────
 
   loadpilot-pyo3-onstart:
     build:
       context: ../
-      dockerfile: bench/Dockerfile.loadpilot
+      dockerfile: bench/Dockerfile.loadpilot.py312
     volumes:
       - ./scenarios:/scenarios
       - ./results:/results
@@ -130,14 +130,14 @@ services:
       loadpilot run /scenarios/pyo3/loadpilot.py
         --scenario PyO3OnStart
         --target http://target:8000
-        --results-json /results/pyo3_onstart_loadpilot.json
+        --results-json /results/pyo3_onstart_py312.json
 
-  # ── PyO3 mode (on_start + check_*) ─────────────────────────────────────────
+  # ── PyO3 mode — persistent threads, GIL Python 3.12 (on_start + check_*) ───
 
   loadpilot-pyo3-full:
     build:
       context: ../
-      dockerfile: bench/Dockerfile.loadpilot
+      dockerfile: bench/Dockerfile.loadpilot.py312
     volumes:
       - ./scenarios:/scenarios
       - ./results:/results
@@ -151,7 +151,49 @@ services:
       loadpilot run /scenarios/pyo3/loadpilot.py
         --scenario PyO3Full
         --target http://target:8000
-        --results-json /results/pyo3_full_loadpilot.json
+        --results-json /results/pyo3_full_py312.json
+
+  # ── PyO3 max throughput (on_start only) ──────────────────────────────────────
+
+  loadpilot-pyo3-max-onstart:
+    build:
+      context: ../
+      dockerfile: bench/Dockerfile.loadpilot.py312
+    volumes:
+      - ./scenarios:/scenarios
+      - ./results:/results
+    networks:
+      - bench
+    depends_on:
+      target:
+        condition: service_healthy
+    profiles: ["loadpilot-pyo3-max-onstart"]
+    command: >
+      loadpilot run /scenarios/pyo3/loadpilot.py
+        --scenario PyO3MaxOnStart
+        --target http://target:8000
+        --results-json /results/pyo3_max_onstart_py312.json
+
+  # ── PyO3 max throughput (on_start + check_*) ─────────────────────────────────
+
+  loadpilot-pyo3-max-full:
+    build:
+      context: ../
+      dockerfile: bench/Dockerfile.loadpilot.py312
+    volumes:
+      - ./scenarios:/scenarios
+      - ./results:/results
+    networks:
+      - bench
+    depends_on:
+      target:
+        condition: service_healthy
+    profiles: ["loadpilot-pyo3-max-full"]
+    command: >
+      loadpilot run /scenarios/pyo3/loadpilot.py
+        --scenario PyO3MaxFull
+        --target http://target:8000
+        --results-json /results/pyo3_max_full_py312.json
 
 networks:
   bench:

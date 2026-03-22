@@ -62,14 +62,18 @@ run locust-max    "Locust"    ; cooldown
 run k6-max        "k6"
 echo
 
-# ── PyO3 mode (LoadPilot only) ────────────────────────────────────────────────
-echo "[3/4] PyO3 scenario — on_start only (target: 500 RPS, 30s)"
+# ── PyO3 mode (LoadPilot only, persistent threads + GIL Python 3.12) ─────────
+echo "[3/4] PyO3 — 500 RPS, on_start only"
+run loadpilot-pyo3-onstart "LoadPilot PyO3 on_start (500 RPS)" ; cooldown
 
-run loadpilot-pyo3-onstart "LoadPilot (on_start only)" ; cooldown
+echo "[3/4] PyO3 — 500 RPS, on_start + check_*"
+run loadpilot-pyo3-full "LoadPilot PyO3 full (500 RPS)" ; cooldown
 
-echo "[3/4] PyO3 scenario — on_start + check_* (target: 500 RPS, 30s)"
+echo "[3/4] PyO3 — max throughput, on_start only"
+run loadpilot-pyo3-max-onstart "LoadPilot PyO3 on_start (max)" ; cooldown
 
-run loadpilot-pyo3-full "LoadPilot (on_start + check_*)"
+echo "[3/4] PyO3 — max throughput, on_start + check_*"
+run loadpilot-pyo3-max-full "LoadPilot PyO3 full (max)"
 echo
 
 # ── Report ─────────────────────────────────────────────────────────────────────

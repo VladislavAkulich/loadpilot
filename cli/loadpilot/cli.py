@@ -98,7 +98,9 @@ def _build_plan(
 
     # n_vusers: enough VUsers to sustain peak RPS, staggered over ramp-up to
     # avoid triggering server-side rate limits on on_start (e.g. login endpoints).
-    n_vusers = max(3, s.rps // 2)
+    # Cap at 100: in PyO3 mode each VUser runs RustClient HTTP (~1ms/task),
+    # so 100 VUsers can easily sustain 50 000 RPS — no need for more threads.
+    n_vusers = min(max(5, s.rps // 100), 100)
 
     # Pre-run each task with a MockClient to extract the real URL and method.
     # This works for pure static scenarios (no on_start state needed).
@@ -116,7 +118,11 @@ def _build_plan(
         if tmp is not None:
             mock = _MockClient()
             try:
-                td.func(tmp, mock)
+                import asyncio as _asyncio
+                import inspect as _inspect
+                result = td.func(tmp, mock)
+                if _inspect.iscoroutine(result):
+                    _asyncio.run(result)
                 m, p, h, b = mock.get_call()
                 if p:
                     url, method, headers, body = p, (m or "GET"), h, b

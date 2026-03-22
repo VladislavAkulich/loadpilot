@@ -1,0 +1,30 @@
+# Build coordinator against GIL Python 3.12 (standard CPython, no free-threading).
+# Used to benchmark persistent VUser thread architecture on GIL Python.
+
+# Stage 1: Build Rust coordinator and install Python CLI.
+FROM python:3.12-slim AS app-builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl pkg-config libssl-dev build-essential && \
+    rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.85.0
+ENV PATH="/root/.cargo/bin:$PATH"
+
+# Build the coordinator binary.
+WORKDIR /engine
+COPY engine/ .
+ENV PYO3_PYTHON=/usr/local/bin/python3
+RUN cargo build --release --package coordinator
+
+# Install the loadpilot CLI and all its Python dependencies.
+COPY cli/ /app/cli/
+RUN cp /engine/target/release/coordinator /app/cli/loadpilot/coordinator
+RUN LOADPILOT_SKIP_CARGO=1 pip3 install --no-cache-dir /app/cli/
+
+# Stage 2: Lean runtime image.
+FROM python:3.12-slim
+COPY --from=app-builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=app-builder /usr/local/bin/loadpilot /usr/local/bin/loadpilot
+COPY --from=app-builder /app/cli/loadpilot/coordinator /usr/local/lib/python3.12/site-packages/loadpilot/coordinator
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libssl3 && \
+    rm -rf /var/lib/apt/lists/*

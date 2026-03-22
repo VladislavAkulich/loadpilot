@@ -1,4 +1,6 @@
+import asyncio
 import functools
+import inspect
 from dataclasses import dataclass, field
 from typing import Callable, Any
 
@@ -106,9 +108,14 @@ def task(_func=None, *, weight: int = 1):
     """
 
     def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            return func(*args, **kwargs)
+        if inspect.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def wrapper(*args, **kwargs):  # type: ignore[misc]
+                return await func(*args, **kwargs)
+        else:
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs):
+                return func(*args, **kwargs)
 
         wrapper._task_weight = weight  # type: ignore[attr-defined]
         return wrapper

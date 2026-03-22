@@ -188,7 +188,10 @@ All profiles work in distributed mode.
 |---------------------------|------|--------|-------------|
 | `on_start(self, client)`  | Once per VUser, before tasks | Real HTTP (httpx) | ✅ pre-auth pool |
 | `on_stop(self, client)`   | Once per VUser, after test   | Real HTTP (httpx) | ❌ skipped |
-| `check_{task}(self, resp)`| After each task's HTTP response | — | ❌ status-based only |
+| `check_{task}(self, resp)`| After each task's last HTTP response | — | ❌ status-based only |
+
+Tasks can be `async def` — LoadPilot drives them via a `coro.send(None)` fast path
+with automatic fallback to `asyncio.run_until_complete` for tasks with real `await`.
 
 > In distributed mode `on_start` runs on the coordinator, captures per-VUser
 > headers, and ships them with the plan. Agents rotate through pre-authenticated
@@ -420,10 +423,14 @@ Coordinator (Rust / tokio)
         │     reqwest async HTTP → record success/error
         │     body not read (no check_* to feed)
         │
-        └── PyO3 mode (on_start / check_* present)
+        └── PyO3 mode (on_start / check_* / async tasks present)
+              one OS thread per VUser — persistent, no per-task spawn overhead
+              Python::attach per message only (~1–5µs channel overhead)
               RustClient (PyO3 pyclass) passed to Python task
-              py.allow_threads(|| reqwest HTTP) — GIL released for I/O
-              GIL re-acquired only for Python callback
+              py.detach(|| reqwest HTTP) — GIL released during I/O
+              GIL re-acquired only for Python callback execution
+              async def tasks driven via coro.send(None) fast path
+              — avoids asyncio scheduling overhead for sync-body coroutines
         │
         ├── stdout JSON lines (1/sec) → CLI live dashboard
         └── :9090/metrics → Prometheus / Grafana
@@ -434,39 +441,66 @@ Coordinator (Rust / tokio)
 ## Benchmark
 
 All tools run in Docker against a Rust/axum echo server on the same machine.
-Tools run sequentially with a 10s cooldown. LoadPilot uses static mode (no Python callbacks).
+Tools run sequentially with a 10s cooldown. LoadPilot uses static mode (no Python callbacks)
+for the precision and max-throughput comparisons.
+
+Reproduce: `cd bench && ./run.sh`
 
 ### Precision — 500 RPS target, 30s constant
 
-| Tool | RPS actual | p50 | p95 | p99 | Errors |
-|------|-----------|-----|-----|-----|--------|
-| LoadPilot | 500 | 3ms | 6ms | 11ms | 0% |
-| k6 | 500 | 1ms | 3ms | 8ms | 0% |
-| Locust | 497 | 170ms | 360ms | 1500ms | 0% |
+| Tool | RPS actual | p50 | p99 | Errors |
+|------|-----------|-----|-----|--------|
+| LoadPilot | 499 | 3ms | 8ms | 0% |
+| k6 | 500 | 1ms | 9ms | 0% |
+| Locust | 497 | 120ms | 1400ms | 0% |
 
-LoadPilot and k6 are both accurate. Locust hits the target RPS but adds significant latency overhead from its Python/GIL scheduler — visible even at moderate load.
+LoadPilot and k6 track the target accurately. Locust reaches the target RPS but its
+Python/GIL scheduler adds significant latency even at moderate load.
 
 ### Max throughput — 30s constant, no artificial cap
 
-| Tool | RPS | p50 | p95 | p99 | Errors |
-|------|-----|-----|-----|-----|--------|
-| LoadPilot | **3326** | 19ms | 192ms | 512ms | 0% |
-| k6 | 1617 | 17ms | 113ms | 164ms | 0% |
-| Locust | 694 | 99ms | 130ms | 160ms | 0% |
+| Tool | RPS | p50 | p99 | Errors |
+|------|-----|-----|-----|--------|
+| **LoadPilot** | **3494** | 18ms | 430ms | 0% |
+| k6 | 1638 | 22ms | 187ms | 0% |
+| Locust | 697 | 99ms | 190ms | 0% |
 
-LoadPilot delivers **2.1× k6** and **4.8× Locust** at max throughput with zero errors.
+LoadPilot delivers **2.1× k6** and **5.0× Locust** at max throughput with zero errors.
 
-### PyO3 mode — Python callback cost (500 RPS target)
+### PyO3 mode — architecture comparison (500 RPS target)
 
-| Mode | RPS actual | p50 | p99 | Errors |
-|------|-----------|-----|-----|--------|
-| LoadPilot static (no callbacks) | 500 | 3ms | 11ms | 0% |
-| + `on_start` (login per VUser) | 489 | 7ms | 20ms | 0% |
-| + `on_start` + `check_*` | 489 | 8ms | 32ms | 0% |
+LoadPilot supports Python lifecycle hooks (`on_start`, `check_*`) and async tasks via
+a PyO3 bridge. The bridge architecture evolved across versions:
 
-PyO3 mode reaches ~98% of the target RPS. Each VUser runs in its own thread with its own lock — the GIL is released during HTTP I/O so different VUsers send requests in parallel. Adding `check_*` on top of `on_start` has negligible throughput cost.
+| Architecture | RPS actual | p50 | p99 | Notes |
+|---|---|---|---|---|
+| Static (no callbacks) | 499 | 3ms | 8ms | Rust only |
+| spawn_blocking (old) | 488 | 7ms | 20ms | new OS thread + GIL attach per task |
+| no-GIL Python 3.13t | 478 | 14ms | 127ms | no GIL but higher overhead |
+| **persistent threads (current)** | **487** | **2ms** | **7ms** | one thread per VUser, GIL released during I/O |
 
-Reproduce: `cd bench && ./run.sh` — see [docs/benchmark.md](docs/benchmark.md) for full methodology.
+The current architecture keeps one OS thread per VUser and calls `Python::attach`
+once per task message. HTTP I/O releases the GIL via `py.detach()`, allowing all
+VUser threads to run HTTP requests concurrently. `async def` tasks are driven with a
+`coro.send(None)` fast path — no asyncio scheduling overhead for the common case of
+sync-body coroutines.
+
+### PyO3 max throughput — optimisation experiments
+
+Measured at 3500 RPS target with `on_start` (login) + async task. All experiments
+on the same Python 3.12 (GIL) image, Docker bridge network.
+
+| Approach | RPS | vs previous |
+|---|---|---|
+| `asyncio.run_until_complete` | 1591 | baseline |
+| `asyncio.run_coroutine_threadsafe` | 731 | −54% — OS pipe wakeup overhead |
+| sync `def` (no asyncio) | 2139 | +34% |
+| **`coro.send(None)` fast path** | **2226** | **+40%** |
+| Static ceiling (no Python) | 3494 | reference |
+
+The `coro.send(None)` fast path drives sync-body `async def` without the asyncio
+task scheduler — ~10µs vs ~200µs per coroutine. Falls back to `run_until_complete`
+automatically when the coroutine has real `await` expressions.
 
 ---
 
@@ -491,9 +525,11 @@ Reproduce: `cd bench && ./run.sh` — see [docs/benchmark.md](docs/benchmark.md)
 | v0.5 | NATS SPOF — agent timeout + recovery | ✅ done |
 | v0.5 | Interactive TUI — `loadpilot run` with no args | ✅ done |
 | v0.5 | `loadpilot init` — project scaffold | ✅ done |
-| v0.6 | Benchmark — LoadPilot vs Locust vs k6, published results | planned |
+| v0.6 | Benchmark — LoadPilot vs Locust vs k6, published results | ✅ done |
+| v0.6 | PyO3 persistent threads — one OS thread per VUser, GIL released during I/O | ✅ done |
+| v0.6 | `async def` task support — `coro.send(None)` fast path | ✅ done |
 | v0.6 | GitHub Releases + verify install.sh end-to-end | planned |
-| v1.0 | Public benchmark, production hardening | planned |
+| v1.0 | Production hardening | planned |
 
 ---
 
