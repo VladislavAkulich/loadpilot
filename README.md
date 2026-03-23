@@ -56,7 +56,7 @@ Or run without arguments to pick a scenario interactively:
 loadpilot run --target https://your-api.example.com
 ```
 
-→ [Getting Started in 5 minutes](docs/getting-started.md)
+→ [Getting Started in 5 minutes](https://vladislavakulich.github.io/loadpilot/getting-started.html)
 
 ---
 
@@ -132,7 +132,7 @@ LoadPilot uses **9× less CPU** than k6 at the same load. Locust reaches the RPS
 
 **1.2× k6** and **3.3× Locust** at max throughput. **1.6× better CPU efficiency per request** vs k6.
 
-→ [Full benchmark details and methodology](docs/benchmark.md)
+→ [Full benchmark details and methodology](https://vladislavakulich.github.io/loadpilot/benchmark.html)
 
 ---
 
@@ -181,7 +181,7 @@ everything transparently. `on_start` (login, setup) runs on the coordinator and
 ships per-user auth headers to agents, so distributed tests can authenticate
 without Python running on each agent.
 
-→ [Distributed mode guide](docs/distributed.md)
+→ [Distributed mode guide](https://vladislavakulich.github.io/loadpilot/distributed.html)
 
 ---
 
@@ -201,13 +201,13 @@ Use Grafana to correlate load test metrics with your service's own metrics
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md)
-- [DSL Reference](docs/dsl-reference.md) — `@scenario`, `@task`, `on_start`, `check_*`, `client.batch()`
-- [CLI Reference](docs/cli-reference.md) — all flags for `loadpilot run` and `loadpilot init`
-- [Distributed Mode](docs/distributed.md) — local agents, remote agents, Railway, NATS
-- [Benchmark](docs/benchmark.md) — methodology, full results, how to reproduce
-- [Architecture](docs/architecture.md) — how the Python DSL and Rust engine interact
-- [Development](docs/development.md) — building from source, running tests
+- [Getting Started](https://vladislavakulich.github.io/loadpilot/getting-started.html)
+- [DSL Reference](https://vladislavakulich.github.io/loadpilot/dsl-reference.html) — `@scenario`, `@task`, `on_start`, `check_*`, `client.batch()`
+- [CLI Reference](https://vladislavakulich.github.io/loadpilot/cli-reference.html) — all flags for `loadpilot run` and `loadpilot init`
+- [Distributed Mode](https://vladislavakulich.github.io/loadpilot/distributed.html) — local agents, remote agents, Railway, NATS
+- [Benchmark](https://vladislavakulich.github.io/loadpilot/benchmark.html) — methodology, full results, how to reproduce
+- [Architecture](https://vladislavakulich.github.io/loadpilot/architecture.html) — how the Python DSL and Rust engine interact
+- [Development](https://vladislavakulich.github.io/loadpilot/development.html) — building from source, running tests
 
 ---
 
