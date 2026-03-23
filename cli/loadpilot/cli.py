@@ -460,6 +460,11 @@ def run_command(
         "--results-json",
         help="Write final metrics as JSON to this path (e.g. --results-json results.json).",
     ),
+    save_baseline: bool = typer.Option(
+        False,
+        "--save-baseline",
+        help="Save results as the baseline for future comparisons (.loadpilot/baseline.json).",
+    ),
 ):
     """Run a load test scenario against TARGET. Omit the file to browse interactively."""
     # ── Resolve target: CLI > LOADPILOT_TARGET env > .env > prompt/default ────
@@ -666,6 +671,36 @@ def run_command(
         results_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         console.print(f"  Results JSON   : [cyan]{results_json}[/]")
 
+    if save_baseline and last_metrics:
+        baseline_path = Path(".loadpilot") / "baseline.json"
+        baseline_path.parent.mkdir(exist_ok=True)
+        error_rate = (
+            last_metrics.errors_total / last_metrics.requests_total * 100
+            if last_metrics.requests_total > 0
+            else 0.0
+        )
+        rps_actual = (
+            last_metrics.requests_total / last_metrics.elapsed_secs
+            if last_metrics.elapsed_secs > 0
+            else 0.0
+        )
+        baseline_data = {
+            "scenario": plan.name,
+            "target_url": target,
+            "rps_target": plan.rps,
+            "rps_actual": round(rps_actual, 2),
+            "requests_total": last_metrics.requests_total,
+            "errors_total": last_metrics.errors_total,
+            "error_rate_pct": round(error_rate, 3),
+            "p50_ms": last_metrics.latency.p50_ms,
+            "p95_ms": last_metrics.latency.p95_ms,
+            "p99_ms": last_metrics.latency.p99_ms,
+            "max_ms": last_metrics.latency.max_ms,
+            "duration_secs": last_metrics.elapsed_secs,
+        }
+        baseline_path.write_text(json.dumps(baseline_data, indent=2), encoding="utf-8")
+        console.print(f"  Baseline saved : [cyan]{baseline_path}[/]")
+
     threshold_failed = False
     if last_metrics and plan.thresholds:
         threshold_failed = _check_thresholds(last_metrics, plan.thresholds)
@@ -796,6 +831,102 @@ def version_command():
     except Exception:
         v = "0.1.0-dev"
     console.print(f"LoadPilot [bold]{v}[/]")
+
+
+_DEFAULT_BASELINE = Path(".loadpilot") / "baseline.json"
+
+
+@app.command("compare")
+def compare_command(
+    current: Path = typer.Argument(..., help="Current results JSON to compare against baseline."),
+    baseline: Path = typer.Argument(
+        _DEFAULT_BASELINE,
+        help="Baseline results JSON. Defaults to .loadpilot/baseline.json.",
+    ),
+    regression_threshold: float = typer.Option(
+        10.0,
+        "--threshold",
+        help="Fail with exit code 1 if any metric regressed by more than this % (default: 10).",
+    ),
+):
+    """Compare two --results-json files and show metric deltas."""
+    for path in (baseline, current):
+        if not path.exists():
+            console.print(f"[red]Error:[/] File not found: {path}")
+            raise typer.Exit(1)
+
+    try:
+        b = json.loads(baseline.read_text(encoding="utf-8"))
+        c = json.loads(current.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        console.print(f"[red]Error parsing JSON:[/] {exc}")
+        raise typer.Exit(1)
+
+    console.print(f"\nComparing [cyan]{baseline.name}[/] → [cyan]{current.name}[/]\n")
+
+    if b.get("scenario") or c.get("scenario"):
+        b_scenario = b.get("scenario", "—")
+        c_scenario = c.get("scenario", "—")
+        if b_scenario != c_scenario:
+            console.print(f"[yellow]Warning:[/] different scenarios ({b_scenario} vs {c_scenario})\n")
+
+    metrics = [
+        ("RPS actual",   "rps_actual",    "higher",  "{:.1f}",  ""),
+        ("p50 latency",  "p50_ms",        "lower",   "{:.0f}",  "ms"),
+        ("p95 latency",  "p95_ms",        "lower",   "{:.0f}",  "ms"),
+        ("p99 latency",  "p99_ms",        "lower",   "{:.0f}",  "ms"),
+        ("max latency",  "max_ms",        "lower",   "{:.0f}",  "ms"),
+        ("error rate",   "error_rate_pct","lower",   "{:.2f}",  "%"),
+    ]
+
+    header = f"  {'':18}  {'baseline':>12}  {'current':>12}  {'diff':>10}"
+    console.print(header)
+    console.print("  " + "─" * 58)
+
+    regressions: list[str] = []
+
+    for label, key, better, fmt, unit in metrics:
+        b_val = b.get(key)
+        c_val = c.get(key)
+        if b_val is None or c_val is None:
+            continue
+
+        b_str = fmt.format(b_val) + unit
+        c_str = fmt.format(c_val) + unit
+
+        if b_val == 0:
+            diff_pct = 0.0
+        else:
+            diff_pct = (c_val - b_val) / abs(b_val) * 100
+
+        if diff_pct == 0:
+            diff_str = "—"
+            color = "dim"
+        elif (better == "lower" and diff_pct < 0) or (better == "higher" and diff_pct > 0):
+            diff_str = f"{diff_pct:+.1f}%"
+            color = "green"
+        else:
+            diff_str = f"{diff_pct:+.1f}%"
+            color = "red"
+            if abs(diff_pct) >= regression_threshold:
+                regressions.append(f"{label} regressed {diff_pct:+.1f}%")
+
+        console.print(
+            f"  {label:<18}  {b_str:>12}  {c_str:>12}  [{color}]{diff_str:>10}[/{color}]"
+        )
+
+    console.print()
+
+    if regressions:
+        for r in regressions:
+            console.print(f"  [red]✗[/]  {r}")
+        console.print(
+            f"\n[bold red]Regression detected (threshold: {regression_threshold:.0f}%).[/] "
+            "Exiting with code 1."
+        )
+        raise typer.Exit(1)
+    else:
+        console.print("[bold green]No regressions detected.[/]")
 
 
 if __name__ == "__main__":

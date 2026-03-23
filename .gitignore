@@ -40,3 +40,7 @@ cli/loadpilot/agent.exe
 # LoadPilot generated outputs
 report*.html
 *.html
+
+# LoadPilot local state (baseline stored here by --save-baseline)
+# commit .loadpilot/baseline.json if you want to share it with the team
+.loadpilot/

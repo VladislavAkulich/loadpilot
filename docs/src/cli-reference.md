@@ -4,6 +4,7 @@
 
 ```bash
 loadpilot run [SCENARIO_FILE] [OPTIONS]
+loadpilot compare CURRENT [BASELINE] [OPTIONS]
 loadpilot init [DIRECTORY]
 loadpilot version
 ```
@@ -33,6 +34,7 @@ loadpilot run scenarios/checkout.py --target https://api.example.com
 | `--nats-url`        | —                       | Connect to an external NATS server (use with `--external-agents`) |
 | `--threshold`       | from `@scenario`        | Override an SLA threshold at run time: `--threshold p99_ms=500` |
 | `--results-json`    | off                     | Write final metrics as JSON to this path |
+| `--save-baseline`   | off                     | Save results as baseline to `.loadpilot/baseline.json` |
 
 ### Examples
 
@@ -63,7 +65,67 @@ loadpilot run scenarios/checkout.py \
 
 # dry-run: inspect the generated plan
 loadpilot run scenarios/checkout.py --target https://api.example.com --dry-run
+
+# save baseline for future comparisons
+loadpilot run scenarios/checkout.py --target https://api.example.com --save-baseline
 ```
+
+---
+
+## `loadpilot compare`
+
+Compare two results JSON files and show metric deltas. Useful for detecting
+regressions after a deploy or code change.
+
+```bash
+loadpilot compare current.json
+loadpilot compare current.json baseline.json
+```
+
+If `BASELINE` is omitted, LoadPilot reads `.loadpilot/baseline.json` (saved by `--save-baseline`).
+
+### Options
+
+| Flag            | Default | Description |
+|-----------------|---------|-------------|
+| `--threshold`   | `10`    | Fail with exit code 1 if any metric regressed by more than this % |
+
+### Output
+
+```
+Comparing baseline.json → current.json
+
+                    baseline       current         diff
+  RPS actual          498.2         501.1        +0.6%
+  p50 latency           12ms          9ms       -25.0%
+  p95 latency           28ms         25ms       -10.7%
+  p99 latency           41ms         38ms        -7.3%
+  error rate           0.00%        0.00%           —
+
+No regressions detected.
+```
+
+Green = improvement, red = regression. Exit code `1` if any metric regressed
+beyond `--threshold`.
+
+### Typical workflow
+
+```bash
+# 1. save baseline once (or after intentional improvement)
+loadpilot run scenarios/checkout.py --save-baseline
+
+# 2. run after changes
+loadpilot run scenarios/checkout.py --results-json current.json
+
+# 3. compare
+loadpilot compare current.json
+
+# 4. in CI — fail on > 5% regression
+loadpilot compare current.json --threshold 5
+```
+
+`.loadpilot/baseline.json` is gitignored by default. Commit it if you want
+to share the baseline with your team.
 
 ---
 
