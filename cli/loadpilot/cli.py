@@ -307,6 +307,29 @@ def _check_thresholds(metrics: AgentMetrics, thresholds: dict[str, float]) -> bo
     return False
 
 
+def _resolve_target(cli_target: str | None) -> str | None:
+    """Resolve target URL with priority: CLI flag > LOADPILOT_TARGET env > .env file."""
+    import os
+
+    if cli_target is not None:
+        return cli_target
+
+    env_target = os.environ.get("LOADPILOT_TARGET")
+    if env_target:
+        return env_target
+
+    dot_env = Path(".env")
+    if dot_env.exists():
+        for line in dot_env.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("LOADPILOT_TARGET="):
+                value = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if value:
+                    return value
+
+    return None
+
+
 def _fmt_duration(secs: int) -> str:
     m, s = divmod(secs, 60)
     h, m = divmod(m, 60)
@@ -388,8 +411,8 @@ def run_command(
         None,
         help="Path to the Python scenario file. Omit to browse interactively.",
     ),
-    target: str = typer.Option(
-        "http://localhost:8000", "--target", "-t", help="Base URL of the system under test."
+    target: Optional[str] = typer.Option(
+        None, "--target", "-t", help="Base URL of the system under test."
     ),
     scenario_name: Optional[str] = typer.Option(
         None,
@@ -439,6 +462,9 @@ def run_command(
     ),
 ):
     """Run a load test scenario against TARGET. Omit the file to browse interactively."""
+    # ── Resolve target: CLI > LOADPILOT_TARGET env > .env > prompt/default ────
+    target = _resolve_target(target)
+
     # ── No file given: TUI browser or error ───────────────────────────────────
     if scenario_file is None:
         if not sys.stdin.isatty():
@@ -452,17 +478,20 @@ def run_command(
             raise typer.Exit(0)
         scenario_file, scenario_name = result
 
-        # Prompt for target if it wasn't supplied via --target flag.
-        if target == "http://localhost:8000":
+        # Prompt for target if not resolved from CLI / env / .env.
+        if target is None:
             import questionary
 
             entered = questionary.text(
                 "Target URL:",
-                default=target,
+                default="http://localhost:8000",
             ).ask()
             if not entered:
                 raise typer.Exit(0)
             target = entered.strip()
+
+    if target is None:
+        target = "http://localhost:8000"
 
     if not scenario_file.exists():
         console.print(f"[red]Error:[/] Scenario file not found: {scenario_file}")
@@ -714,7 +743,7 @@ class ExampleFlow(VUser):
     env_example = directory / ".env.example"
     if not env_example.exists():
         env_example.write_text(
-            "TARGET_URL=http://localhost:8000\n",
+            "LOADPILOT_TARGET=http://localhost:8000\n",
             encoding="utf-8",
         )
 
@@ -734,7 +763,9 @@ class ExampleFlow(VUser):
     console.print(
         "  [dim]scenarios/example.py[/]          — edit this to write your first scenario"
     )
-    console.print("  [dim].env.example[/]                   — copy to .env and set TARGET_URL")
+    console.print(
+        "  [dim].env.example[/]                   — copy to .env and set LOADPILOT_TARGET"
+    )
     console.print(
         "  [dim]monitoring/docker-compose.yml[/]  — Prometheus + Grafana (auto-configured)"
     )

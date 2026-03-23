@@ -1,7 +1,10 @@
 # LoadPilot
 
 [![CI](https://github.com/VladislavAkulich/loadpilot/actions/workflows/ci.yml/badge.svg)](https://github.com/VladislavAkulich/loadpilot/actions)
+[![PyPI](https://img.shields.io/pypi/v/loadpilot.svg)](https://pypi.org/project/loadpilot/)
+[![Python](https://img.shields.io/pypi/pyversions/loadpilot.svg)](https://pypi.org/project/loadpilot/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-vladislavakulich.github.io-blue)](https://vladislavakulich.github.io/loadpilot/)
 
 > Write load tests in Python. Run them at Rust speed.
 
@@ -196,6 +199,22 @@ docker compose -f monitoring/docker-compose.yml up -d
 
 Use Grafana to correlate load test metrics with your service's own metrics
 (CPU, DB latency, error rates) on the same timeline.
+
+---
+
+## Development
+
+Requires [just](https://github.com/casey/just).
+
+```bash
+just test        # run all tests (Python + Rust)
+just test-py     # Python tests only
+just test-rust   # Rust tests only
+just fix         # auto-fix lint + format
+just check       # lint + format check (no writes, same as CI)
+just build       # cargo build (debug)
+just build-release  # cargo build --release
+```
 
 ---
 
