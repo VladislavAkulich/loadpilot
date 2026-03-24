@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loadpilot.labels" . | nindent 4 }}
+    app: loadpilot-agent
+spec:
+  replicas: {{ .Values.agent.replicas }}
+  selector:
+    matchLabels:
+      app: loadpilot-agent
+  template:
+    metadata:
+      labels:
+        app: loadpilot-agent
+    spec:
+      containers:
+        - name: agent
+          image: {{ .Values.agent.image }}:{{ .Values.agent.tag }}
+          args:
+            - "--coordinator"
+            - "{{ .Release.Name }}-nats:{{ .Values.nats.port }}"
+            - "--agent-id"
+            - "$(POD_NAME)"
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}

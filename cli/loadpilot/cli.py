@@ -80,7 +80,7 @@ def _build_plan(
     target: str,
     scenario_name: str | None = None,
     distributed: bool = False,
-) -> ScenarioPlan:
+) -> tuple[ScenarioPlan, list]:
     if not _scenarios:
         raise ValueError("No @scenario classes found in the scenario file.")
 
@@ -152,6 +152,8 @@ def _build_plan(
     # The resulting vuser_configs list is shipped with the plan so agents can
     # rotate through pre-authenticated header sets in pure Rust.
     vuser_configs: list[VUserConfig] = []
+    # Keep pre-auth instances so we can call on_stop after the test completes.
+    _preauth_instances: list[tuple] = []  # list of (instance, LoadClient)
     if distributed and "on_start" in s.cls.__dict__:
         from loadpilot.client import LoadClient as _LoadClient
 
@@ -161,18 +163,27 @@ def _build_plan(
         for i in range(pool_size):
             try:
                 instance = s.cls()
-                with _LoadClient(target) as real_client:
-                    instance.on_start(real_client)
+                real_client = _LoadClient(target)
+                instance.on_start(real_client)
                 task_headers: dict[str, dict[str, str]] = {}
+                task_urls: dict[str, str] = {}
+                import asyncio as _asyncio
+                import inspect as _inspect
+
                 for td in s.tasks:
                     mock = _MockClient()
                     try:
-                        td.func(instance, mock)
-                        _, _, h, _ = mock.get_call()
+                        result = td.func(instance, mock)
+                        if _inspect.iscoroutine(result):
+                            _asyncio.run(result)
+                        _, p, h, _ = mock.get_call()
                         task_headers[td.name] = h
+                        if p:
+                            task_urls[td.name] = p
                     except Exception:
                         task_headers[td.name] = {}
-                vuser_configs.append(VUserConfig(task_headers=task_headers))
+                vuser_configs.append(VUserConfig(task_headers=task_headers, task_urls=task_urls))
+                _preauth_instances.append((instance, real_client))
             except Exception as exc:
                 if i == 0:
                     console.print(
@@ -202,7 +213,7 @@ def _build_plan(
         n_vusers=n_vusers if use_pyo3 else None,
         vuser_configs=vuser_configs,
         thresholds=s.thresholds,
-    )
+    ), _preauth_instances
 
 
 def _render_dashboard(metrics: AgentMetrics, scenario_name: str) -> Panel:
@@ -535,7 +546,9 @@ def run_command(
 
     is_distributed = agents > 1 or external_agents > 0 or nats_url is not None
     try:
-        plan = _build_plan(scenario_file, target, scenario_name, distributed=is_distributed)
+        plan, _preauth_instances = _build_plan(
+            scenario_file, target, scenario_name, distributed=is_distributed
+        )
     except ValueError as exc:
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1)
@@ -557,6 +570,15 @@ def run_command(
 
     if dry_run:
         console.print(plan_json)
+        # Clean up any resources created during pre-auth (e.g. on_start created projects).
+        for instance, client in _preauth_instances:
+            try:
+                if hasattr(instance, "on_stop"):
+                    instance.on_stop(client)
+            except Exception:
+                pass
+            finally:
+                client.close()
         raise typer.Exit(0)
 
     try:
@@ -618,6 +640,18 @@ def run_command(
                 console.print(f"[dim]{line}[/]")
 
     proc.wait()
+
+    # Run on_stop for each pre-auth VUser to clean up state created in on_start.
+    if _preauth_instances:
+        console.print("[dim]Distributed post-test: running on_stop for pre-auth VUsers…[/]")
+        for instance, client in _preauth_instances:
+            try:
+                if hasattr(instance, "on_stop"):
+                    instance.on_stop(client)
+            except Exception:
+                pass
+            finally:
+                client.close()
 
     if last_metrics:
         console.print("\n[bold green]Test complete![/]")
@@ -868,15 +902,17 @@ def compare_command(
         b_scenario = b.get("scenario", "—")
         c_scenario = c.get("scenario", "—")
         if b_scenario != c_scenario:
-            console.print(f"[yellow]Warning:[/] different scenarios ({b_scenario} vs {c_scenario})\n")
+            console.print(
+                f"[yellow]Warning:[/] different scenarios ({b_scenario} vs {c_scenario})\n"
+            )
 
     metrics = [
-        ("RPS actual",   "rps_actual",    "higher",  "{:.1f}",  ""),
-        ("p50 latency",  "p50_ms",        "lower",   "{:.0f}",  "ms"),
-        ("p95 latency",  "p95_ms",        "lower",   "{:.0f}",  "ms"),
-        ("p99 latency",  "p99_ms",        "lower",   "{:.0f}",  "ms"),
-        ("max latency",  "max_ms",        "lower",   "{:.0f}",  "ms"),
-        ("error rate",   "error_rate_pct","lower",   "{:.2f}",  "%"),
+        ("RPS actual", "rps_actual", "higher", "{:.1f}", ""),
+        ("p50 latency", "p50_ms", "lower", "{:.0f}", "ms"),
+        ("p95 latency", "p95_ms", "lower", "{:.0f}", "ms"),
+        ("p99 latency", "p99_ms", "lower", "{:.0f}", "ms"),
+        ("max latency", "max_ms", "lower", "{:.0f}", "ms"),
+        ("error rate", "error_rate_pct", "lower", "{:.2f}", "%"),
     ]
 
     header = f"  {'':18}  {'baseline':>12}  {'current':>12}  {'diff':>10}"
@@ -911,9 +947,7 @@ def compare_command(
             if abs(diff_pct) >= regression_threshold:
                 regressions.append(f"{label} regressed {diff_pct:+.1f}%")
 
-        console.print(
-            f"  {label:<18}  {b_str:>12}  {c_str:>12}  [{color}]{diff_str:>10}[/{color}]"
-        )
+        console.print(f"  {label:<18}  {b_str:>12}  {c_str:>12}  [{color}]{diff_str:>10}[/{color}]")
 
     console.print()
 
@@ -927,6 +961,94 @@ def compare_command(
         raise typer.Exit(1)
     else:
         console.print("[bold green]No regressions detected.[/]")
+
+
+_CHART_DIR = Path(__file__).parent / "charts" / "loadpilot"
+_HELM_RELEASE = "loadpilot"
+
+
+def _check_helm() -> None:
+    if shutil.which("helm") is None:
+        console.print(
+            "[red]Error:[/] helm is not installed.\n"
+            "Install it from https://helm.sh/docs/intro/install/"
+        )
+        raise typer.Exit(1)
+
+
+@app.command("deploy")
+def deploy_command(
+    agents: int = typer.Option(3, "--agents", "-a", help="Number of agent replicas to deploy."),
+    namespace: str = typer.Option("loadpilot", "--namespace", "-n", help="Kubernetes namespace."),
+    nats_service: str = typer.Option(
+        "LoadBalancer",
+        "--nats-service",
+        help="NATS service type: LoadBalancer (cloud) or NodePort (minikube).",
+    ),
+    no_monitoring: bool = typer.Option(
+        False, "--no-monitoring", help="Skip Prometheus and Grafana."
+    ),
+    set_values: Optional[list[str]] = typer.Option(
+        None, "--set", help="Override chart values: --set key=value."
+    ),
+):
+    """Deploy LoadPilot agents + NATS + monitoring to Kubernetes."""
+    _check_helm()
+
+    console.print(
+        f"[bold green]Deploying LoadPilot[/] — {agents} agent(s) · namespace: [cyan]{namespace}[/]"
+    )
+
+    cmd = [
+        "helm",
+        "upgrade",
+        "--install",
+        _HELM_RELEASE,
+        str(_CHART_DIR),
+        "--namespace",
+        namespace,
+        "--create-namespace",
+        "--set",
+        f"agent.replicas={agents}",
+        "--set",
+        f"nats.service.type={nats_service}",
+        "--set",
+        f"monitoring.enabled={str(not no_monitoring).lower()}",
+        "--wait",
+    ]
+    if set_values:
+        for v in set_values:
+            cmd += ["--set", v]
+
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
+
+    console.print("\n[bold green]Deployed.[/]")
+    console.print(
+        "\nGet the NATS external address:\n"
+        f"  [bold]kubectl get svc {_HELM_RELEASE}-nats -n {namespace}[/]\n"
+    )
+    console.print(
+        "Then run your test:\n"
+        f"  [bold]loadpilot run scenarios/checkout.py "
+        f"--nats-url nats://<EXTERNAL-IP>:4222 --external-agents {agents}[/]"
+    )
+
+
+@app.command("teardown")
+def teardown_command(
+    namespace: str = typer.Option("loadpilot", "--namespace", "-n", help="Kubernetes namespace."),
+):
+    """Remove the LoadPilot stack from Kubernetes."""
+    _check_helm()
+
+    console.print(f"Removing [cyan]{_HELM_RELEASE}[/] from namespace [cyan]{namespace}[/]…")
+    result = subprocess.run(["helm", "uninstall", _HELM_RELEASE, "--namespace", namespace])
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
+
+    console.print("[bold green]Teardown complete.[/]")
 
 
 if __name__ == "__main__":

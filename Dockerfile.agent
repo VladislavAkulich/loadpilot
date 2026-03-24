@@ -1,0 +1,16 @@
+# ── Build stage ───────────────────────────────────────────────────────────────
+FROM rust:1.85-slim AS builder
+
+WORKDIR /build
+COPY engine/ .
+RUN cargo build --release --package agent
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+# Agent is pure Rust — no Python needed.
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/agent /usr/local/bin/loadpilot-agent
+
+ENTRYPOINT ["loadpilot-agent"]

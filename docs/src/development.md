@@ -57,8 +57,11 @@ Tests skip automatically with a clear message if the binary is not found.
 ```bash
 cd engine
 
-# run unit tests
+# run unit tests (coordinator + agent)
 cargo test
+
+# agent-only tests
+cargo test --package agent
 
 # unit tests + coverage summary (requires cargo-llvm-cov)
 cargo cov
@@ -67,12 +70,69 @@ cargo cov
 cargo cov-html
 ```
 
+The agent test suite (`engine/agent/src/runner.rs`) covers:
+
+| Test | What it guards |
+|---|---|
+| `budget_low_rps_regression` | `round()` → 0 bug at low RPS; budget accumulation fix |
+| `budget_matches_target_rps_over_one_second` | Correct request rate for 1–100 RPS |
+| `budget_residual_bounded` | Budget stays in `[0, 1)` — no runaway accumulation |
+| `task_urls_overrides_task_default_url` | Per-VUser URL from `on_start` reaches agents |
+| `task_urls_falls_back_to_task_url_when_absent` | Fallback to task's static URL |
+| `empty_vuser_configs_uses_task_url` | Pool-size=0 path |
+| `ramp/constant/step/spike_mode_*` | All load profile modes |
+| `pick_task_respects_weights` | Weighted task selection |
+| `ramp_total_duration_*` | Duration includes ramp-up for Ramp mode |
+
 Install `cargo-llvm-cov` if not present:
 
 ```bash
 cargo install cargo-llvm-cov
 rustup component add llvm-tools-preview
 ```
+
+## Helm Chart (in progress)
+
+A Helm chart for deploying the distributed agent stack to Kubernetes is located at
+`cli/loadpilot/charts/loadpilot/`. It is **not yet published** to a Helm repository
+but can be installed directly from the source tree.
+
+### What the chart deploys
+
+| Component | Description |
+|---|---|
+| `loadpilot-nats` | Embedded NATS broker (single-node) |
+| `loadpilot-agent` | N agent pods (configurable replicas) |
+| `loadpilot-prometheus` | Prometheus scraping coordinator metrics |
+| `loadpilot-grafana` | Grafana with pre-provisioned LoadPilot dashboard |
+
+### Local install (kind / minikube)
+
+```bash
+# Build and load images
+docker build -f Dockerfile.agent -t loadpilot-agent:local .
+docker build -f Dockerfile.coordinator -t loadpilot-coordinator:local .
+kind load docker-image loadpilot-agent:local --name <cluster-name>
+
+# Install chart
+helm install loadpilot cli/loadpilot/charts/loadpilot \
+  --namespace loadpilot --create-namespace \
+  --set agent.image=loadpilot-agent \
+  --set agent.tag=local
+
+# Forward NATS + Grafana
+kubectl port-forward -n loadpilot svc/loadpilot-nats 4222:4222
+kubectl port-forward -n loadpilot svc/loadpilot-grafana 3000:3000
+```
+
+### Known limitations (not yet production-ready)
+
+- Prometheus scrape target is hardcoded to `host.docker.internal:9090` (coordinator
+  runs locally and is not deployed to k8s)
+- No `imagePullSecrets` support (add manually for private registries)
+- Grafana admin password stored in `values.yaml` plaintext (no Secret)
+- No PVC for Grafana / Prometheus — data lost on pod restart
+- No `NOTES.txt` post-install instructions
 
 ## Benchmark
 

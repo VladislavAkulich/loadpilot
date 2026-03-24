@@ -1,0 +1,54 @@
+agent:
+  replicas: 3
+  image: ghcr.io/vladislavakul ich/loadpilot-agent
+  tag: latest
+  resources:
+    requests:
+      cpu: 500m
+      memory: 128Mi
+    limits:
+      cpu: 2000m
+      memory: 512Mi
+
+nats:
+  image: nats:2.10-alpine
+  service:
+    # LoadBalancer — external IP (EKS, AKS, GKE, DOKS)
+    # NodePort     — for bare-metal / minikube
+    type: LoadBalancer
+  port: 4222
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+monitoring:
+  enabled: true
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    port: 9090
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    port: 3000
+    service:
+      type: LoadBalancer
+    adminPassword: admin
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi

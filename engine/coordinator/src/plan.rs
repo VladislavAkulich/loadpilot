@@ -112,6 +112,10 @@ pub struct VUserConfig {
     /// task_name → headers map produced after running on_start + task mock-probe.
     #[serde(default)]
     pub task_headers: HashMap<String, HashMap<String, String>>,
+    /// task_name → URL override: set when on_start stores state used in task URLs
+    /// (e.g. self.project_id). Takes precedence over the task's default URL.
+    #[serde(default)]
+    pub task_urls: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

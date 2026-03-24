@@ -24,11 +24,14 @@ class VUserConfig(BaseModel):
     """Per-VUser state pre-extracted from on_start for distributed mode.
 
     Coordinator runs on_start for each VUser and captures the HTTP headers
-    each task would use (via MockClient). Agents receive this pool and rotate
-    through it, keeping all HTTP execution in pure Rust.
+    and URLs each task would use (via MockClient). Agents receive this pool
+    and rotate through it, keeping all HTTP execution in pure Rust.
     """
 
     task_headers: dict[str, dict[str, str]] = Field(default_factory=dict)
+    # Per-VUser URL overrides: populated when on_start sets state used in URLs
+    # (e.g. self.project_id). Takes precedence over the task's default URL.
+    task_urls: dict[str, str] = Field(default_factory=dict)
 
 
 class ScenarioPlan(BaseModel):

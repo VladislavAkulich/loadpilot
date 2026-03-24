@@ -1,0 +1,32 @@
+# ── Build stage ───────────────────────────────────────────────────────────────
+# Use Python image as base so PyO3 can find libpython at compile time.
+FROM python:3.12-slim AS builder
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+COPY engine/ .
+RUN cargo build --release --package coordinator
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM python:3.12-slim
+
+# Install loadpilot so coordinator can import scenario files in PyO3 mode.
+RUN pip install --no-cache-dir loadpilot
+
+COPY --from=builder /build/target/release/coordinator /usr/local/bin/coordinator
+
+# Scenarios are mounted by the user: -v ./scenarios:/scenarios
+WORKDIR /scenarios
+
+# Prometheus metrics
+EXPOSE 9090
+
+ENTRYPOINT ["coordinator"]

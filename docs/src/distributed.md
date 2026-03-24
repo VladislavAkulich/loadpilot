@@ -75,9 +75,9 @@ loadpilot run scenarios/checkout.py \
 
 When a scenario uses `on_start` (e.g. login → per-user auth token), the coordinator
 runs `on_start` N times locally against the target before the test begins. It
-captures the headers each VUser would set and ships them with the plan. Agents
-rotate through these pre-authenticated header sets in pure Rust — no Python required
-on agent machines.
+captures the headers **and URLs** each VUser would set and ships them with the plan.
+Agents rotate through these pre-authenticated header sets in pure Rust — no Python
+required on agent machines.
 
 ```python
 @scenario(rps=100, duration="2m")
@@ -92,16 +92,78 @@ class CheckoutFlow(VUser):
         client.get("/api/products", headers={"Authorization": f"Bearer {self.token}"})
 ```
 
+### Per-VUser URL state
+
+If `on_start` stores state that influences task URLs (e.g. a resource ID created
+during setup), the coordinator captures the resulting URL for each VUser and ships
+it as an override. Agents use the per-VUser URL instead of the task's default:
+
+```python
+@scenario(rps=5, duration="2m", ramp_up="20s")
+class ProjectCRUDFlow(VUser):
+    _lock = threading.Lock()
+    _shared_project_id: int | None = None  # one project shared across all VUsers
+
+    def on_start(self, client):
+        # login
+        super().on_start(client)
+        # create the shared project once; all VUsers reuse the same ID
+        with self.__class__._lock:
+            if self.__class__._shared_project_id is None:
+                resp = client.post("/api/v1/projects", json=new_project(), headers=self._auth())
+                resp.raise_for_status()
+                self.__class__._shared_project_id = resp.json()["id"]
+        self.project_id = self.__class__._shared_project_id
+
+    @task(weight=4)
+    def read_project(self, client):
+        # URL /api/v1/projects/{self.project_id} is captured per-VUser
+        # and shipped to agents — agents use the real URL, not "/"
+        client.get(f"/api/v1/projects/{self.project_id}", headers=self._auth())
+```
+
+> **Tip — resource-limited accounts:** if your on_start creates a resource and the
+> account has a per-user limit, use a class-level shared resource (as above) so
+> only one object is created regardless of the pre-auth pool size.
+
+### `on_stop` in distributed mode
+
+If `on_stop` is defined, the coordinator calls it for each pre-authenticated VUser
+after the test completes. Use this to delete resources created in `on_start`:
+
+```python
+def on_stop(self, client):
+    with self.__class__._lock:
+        self.__class__._vuser_count -= 1
+        last = self.__class__._vuser_count == 0
+    if last and self.__class__._shared_project_id is not None:
+        client.delete(
+            f"/api/v1/projects/{self.__class__._shared_project_id}",
+            headers=self._auth(),
+        )
+        self.__class__._shared_project_id = None
+```
+
+`on_stop` is also called during `--dry-run` to prevent resource leaks from the
+pre-auth phase.
+
 ---
 
 ## Reliability guarantees
 
 - **Synchronised start** — all agents begin within ~1ms of each other. The
   coordinator sends a `start_at` timestamp; agents sleep until it fires.
+- **PING/PONG keepalive** — agents and coordinator respond to NATS server PING
+  frames so long-running tests (> 2 min) are not disconnected mid-run.
+- **Agent re-registration** — agents re-announce to the coordinator every 3s until
+  they receive a shard, so coordinator and agents can start in any order.
 - **Agent timeout** — if an agent stops reporting for 15s it is marked timed-out;
   the test continues on remaining agents without hanging.
 - **Agent recovery** — if a timed-out agent reconnects mid-test it is restored to
   the active pool.
+- **Fractional RPS budget** — the dispatcher accumulates sub-integer request budgets
+  across ticks so low-RPS scenarios (e.g. 3 RPS split across 2 agents) fire the
+  correct number of requests instead of rounding to zero.
 
 ---
 

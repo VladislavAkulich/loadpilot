@@ -51,6 +51,7 @@ artifacts = [
     "loadpilot/coordinator.exe",
     "loadpilot/templates/monitoring/docker-compose.yml",
     "loadpilot/templates/monitoring/grafana-dashboard.json",
+    "loadpilot/charts/**/*",
 ]
 
 [tool.pytest.ini_options]

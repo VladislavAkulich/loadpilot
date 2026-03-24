@@ -491,7 +491,8 @@ pub async fn run_with_nats_url(
     use crate::nats_client::NatsClient;
 
     eprintln!("[distributed] connecting to external NATS at {nats_url}");
-    let mut nats = NatsClient::connect(nats_url)
+    let addr = nats_url.strip_prefix("nats://").unwrap_or(nats_url);
+    let mut nats = NatsClient::connect(addr)
         .await
         .with_context(|| format!("Failed to connect to NATS at {nats_url}"))?;
 

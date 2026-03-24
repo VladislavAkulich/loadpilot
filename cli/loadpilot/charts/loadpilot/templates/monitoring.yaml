@@ -1,0 +1,171 @@
+{{- if .Values.monitoring.enabled }}
+---
+# ── Prometheus ────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-prometheus-config
+  namespace: {{ .Release.Namespace }}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 5s
+    scrape_configs:
+      - job_name: loadpilot-coordinator
+        static_configs:
+          - targets: ['host.docker.internal:9090']
+            labels:
+              role: coordinator
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-prometheus
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loadpilot.labels" . | nindent 4 }}
+    app: loadpilot-prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loadpilot-prometheus
+  template:
+    metadata:
+      labels:
+        app: loadpilot-prometheus
+    spec:
+      containers:
+        - name: prometheus
+          image: {{ .Values.monitoring.prometheus.image }}
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.retention.time=7d"
+          ports:
+            - containerPort: {{ .Values.monitoring.prometheus.port }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+          resources:
+            {{- toYaml .Values.monitoring.prometheus.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-prometheus-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-prometheus
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: loadpilot-prometheus
+  ports:
+    - port: {{ .Values.monitoring.prometheus.port }}
+      targetPort: {{ .Values.monitoring.prometheus.port }}
+---
+# ── Grafana provisioning ───────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-grafana-datasources
+  namespace: {{ .Release.Namespace }}
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        url: http://{{ .Release.Name }}-prometheus:{{ .Values.monitoring.prometheus.port }}
+        access: proxy
+        isDefault: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-grafana-dashboards-provider
+  namespace: {{ .Release.Namespace }}
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: loadpilot
+        type: file
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-grafana-dashboard-json
+  namespace: {{ .Release.Namespace }}
+data:
+  loadpilot.json: |
+{{ .Files.Get "files/grafana-dashboard.json" | indent 4 }}
+---
+# ── Grafana ───────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-grafana
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loadpilot.labels" . | nindent 4 }}
+    app: loadpilot-grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loadpilot-grafana
+  template:
+    metadata:
+      labels:
+        app: loadpilot-grafana
+    spec:
+      containers:
+        - name: grafana
+          image: {{ .Values.monitoring.grafana.image }}
+          ports:
+            - containerPort: {{ .Values.monitoring.grafana.port }}
+          env:
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: {{ .Values.monitoring.grafana.adminPassword | quote }}
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: "Viewer"
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboards-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards-json
+              mountPath: /var/lib/grafana/dashboards
+          resources:
+            {{- toYaml .Values.monitoring.grafana.resources | nindent 12 }}
+      volumes:
+        - name: datasources
+          configMap:
+            name: {{ .Release.Name }}-grafana-datasources
+        - name: dashboards-provider
+          configMap:
+            name: {{ .Release.Name }}-grafana-dashboards-provider
+        - name: dashboards-json
+          configMap:
+            name: {{ .Release.Name }}-grafana-dashboard-json
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-grafana
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: {{ .Values.monitoring.grafana.service.type }}
+  selector:
+    app: loadpilot-grafana
+  ports:
+    - port: {{ .Values.monitoring.grafana.port }}
+      targetPort: {{ .Values.monitoring.grafana.port }}
+{{- end }}

@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-nats
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loadpilot.labels" . | nindent 4 }}
+    app: loadpilot-nats
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loadpilot-nats
+  template:
+    metadata:
+      labels:
+        app: loadpilot-nats
+    spec:
+      containers:
+        - name: nats
+          image: {{ .Values.nats.image }}
+          ports:
+            - containerPort: {{ .Values.nats.port }}
+          resources:
+            {{- toYaml .Values.nats.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-nats
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loadpilot.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.nats.service.type }}
+  selector:
+    app: loadpilot-nats
+  ports:
+    - name: nats
+      port: {{ .Values.nats.port }}
+      targetPort: {{ .Values.nats.port }}

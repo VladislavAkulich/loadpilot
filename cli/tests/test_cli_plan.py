@@ -37,7 +37,7 @@ def test_single_scenario_no_name_uses_it(tmp_path):
         def hit(self, client):
             client.get("/")
 
-    plan = _build_plan(tmp_path / "s.py", "http://localhost", scenario_name=None)
+    plan, _ = _build_plan(tmp_path / "s.py", "http://localhost", scenario_name=None)
     assert plan.name == "OnlyFlow"
     assert plan.rps == 30
 
@@ -47,14 +47,14 @@ def test_single_scenario_no_name_uses_it(tmp_path):
 
 def test_select_by_name_first(tmp_path):
     _register_two()
-    plan = _build_plan(tmp_path / "s.py", "http://localhost", scenario_name="FlowA")
+    plan, _ = _build_plan(tmp_path / "s.py", "http://localhost", scenario_name="FlowA")
     assert plan.name == "FlowA"
     assert plan.rps == 10
 
 
 def test_select_by_name_second(tmp_path):
     _register_two()
-    plan = _build_plan(tmp_path / "s.py", "http://localhost", scenario_name="FlowB")
+    plan, _ = _build_plan(tmp_path / "s.py", "http://localhost", scenario_name="FlowB")
     assert plan.name == "FlowB"
     assert plan.rps == 20
 
@@ -91,7 +91,7 @@ def test_static_scenario_distributed_no_pyo3(tmp_path):
         def hit(self, client):
             client.get("/ping")
 
-    plan = _build_plan(tmp_path / "s.py", "http://localhost", distributed=True)
+    plan, _ = _build_plan(tmp_path / "s.py", "http://localhost", distributed=True)
     assert plan.scenario_file is None
     assert plan.scenario_class is None
     assert plan.vuser_configs == []
@@ -109,7 +109,7 @@ def test_non_distributed_with_on_start_uses_pyo3(tmp_path):
         def hit(self, client):
             client.get("/api", headers={"Authorization": f"Bearer {self.token}"})
 
-    plan = _build_plan(tmp_path / "s.py", "http://localhost", distributed=False)
+    plan, _ = _build_plan(tmp_path / "s.py", "http://localhost", distributed=False)
     assert plan.scenario_file is not None
     assert plan.scenario_class == "AuthFlow"
     assert plan.vuser_configs == []
@@ -129,7 +129,7 @@ def test_distributed_with_on_start_disables_pyo3(tmp_path):
             client.get("/api")
 
     # distributed=True — on_start will fail (no real server), pre-auth falls back
-    plan = _build_plan(tmp_path / "s.py", "http://localhost", distributed=True)
+    plan, _ = _build_plan(tmp_path / "s.py", "http://localhost", distributed=True)
     # PyO3 bridge must be disabled regardless
     assert plan.scenario_file is None
     assert plan.scenario_class is None
@@ -144,7 +144,7 @@ def test_distributed_vuser_configs_empty_when_no_on_start(tmp_path):
         def ping(self, client):
             client.get("/ping")
 
-    plan = _build_plan(tmp_path / "s.py", "http://localhost", distributed=True)
+    plan, _ = _build_plan(tmp_path / "s.py", "http://localhost", distributed=True)
     assert plan.vuser_configs == []
 
 
@@ -163,7 +163,7 @@ def test_n_vusers_calculation_minimum(tmp_path):
         def hit(self, client):
             client.get("/")
 
-    plan = _build_plan(tmp_path / "s.py", "http://localhost")
+    plan, _ = _build_plan(tmp_path / "s.py", "http://localhost")
     assert plan.n_vusers == 5  # max(5, 50//100=0) = 5
 
 
@@ -179,7 +179,7 @@ def test_n_vusers_calculation_mid_rps(tmp_path):
         def hit(self, client):
             client.get("/")
 
-    plan = _build_plan(tmp_path / "s.py", "http://localhost")
+    plan, _ = _build_plan(tmp_path / "s.py", "http://localhost")
     assert plan.n_vusers == 10  # 1000 // 100 = 10
 
 
@@ -195,7 +195,7 @@ def test_n_vusers_calculation_high_rps(tmp_path):
         def hit(self, client):
             client.get("/")
 
-    plan = _build_plan(tmp_path / "s.py", "http://localhost")
+    plan, _ = _build_plan(tmp_path / "s.py", "http://localhost")
     assert plan.n_vusers == 100  # min(150, 100) = 100
 
 
@@ -214,7 +214,7 @@ def test_check_method_enables_pyo3(tmp_path):
         def check_ping(self, status_code, body):
             assert status_code == 200
 
-    plan = _build_plan(tmp_path / "s.py", "http://localhost")
+    plan, _ = _build_plan(tmp_path / "s.py", "http://localhost")
     assert plan.scenario_file is not None
     assert plan.scenario_class == "CheckOnlyFlow"
     assert plan.n_vusers is not None

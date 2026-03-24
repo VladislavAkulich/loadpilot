@@ -93,7 +93,9 @@ async fn run_once(args: &Args) -> Result<()> {
     nats.subscribe(&shard_subject, "shard").await?;
     nats.subscribe("loadpilot.control", "ctrl").await?;
 
-    // Announce to coordinator.
+    // Announce to coordinator and re-announce every 3s until shard arrives.
+    // NATS is fire-and-forget: if the coordinator starts after the agent,
+    // it would miss the initial register. Periodic re-announce fixes this.
     let reg = serde_json::to_string(&RegisterMsg {
         agent_id: args.agent_id.clone(),
     })?;
@@ -105,24 +107,33 @@ async fn run_once(args: &Args) -> Result<()> {
     );
 
     // Wait for shard plan or stop signal.
+    let mut reannounce = interval(Duration::from_secs(3));
+    reannounce.tick().await; // consume the immediate first tick
     let msg: ShardMsg = loop {
-        let (subject, payload) = nats.next_message().await?;
-        if subject == shard_subject {
-            let msg: ShardMsg = serde_json::from_slice(&payload)?;
-            eprintln!(
-                "[agent {}] received shard ({} RPS)",
-                args.agent_id, msg.plan.rps
-            );
-            break msg;
-        }
-        if subject == "loadpilot.control" {
-            if let Ok(ctrl) = serde_json::from_slice::<ControlMsg>(&payload) {
-                if ctrl.command == "stop" {
+        tokio::select! {
+            _ = reannounce.tick() => {
+                nats.publish("loadpilot.register", reg.as_bytes()).await?;
+            }
+            result = nats.next_message() => {
+                let (subject, payload) = result?;
+                if subject == shard_subject {
+                    let msg: ShardMsg = serde_json::from_slice(&payload)?;
                     eprintln!(
-                        "[agent {}] received stop before shard — will retry",
-                        args.agent_id
+                        "[agent {}] received shard ({} RPS)",
+                        args.agent_id, msg.plan.rps
                     );
-                    return Ok(());
+                    break msg;
+                }
+                if subject == "loadpilot.control" {
+                    if let Ok(ctrl) = serde_json::from_slice::<ControlMsg>(&payload) {
+                        if ctrl.command == "stop" {
+                            eprintln!(
+                                "[agent {}] received stop before shard — will retry",
+                                args.agent_id
+                            );
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
