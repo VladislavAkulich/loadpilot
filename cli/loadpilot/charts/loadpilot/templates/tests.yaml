@@ -1,0 +1,68 @@
+---
+# ── Test: NATS reachable ──────────────────────────────────────────────────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-test-nats
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: nats-check
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "Checking NATS at {{ .Release.Name }}-nats:{{ .Values.nats.port }}..."
+          nc -zv {{ .Release.Name }}-nats {{ .Values.nats.port }}
+          echo "NATS OK"
+{{- if .Values.monitoring.enabled }}
+---
+# ── Test: Prometheus healthy ──────────────────────────────────────────────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-test-prometheus
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: prometheus-check
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "Checking Prometheus at {{ .Release.Name }}-prometheus:{{ .Values.monitoring.prometheus.port }}..."
+          wget -qO- http://{{ .Release.Name }}-prometheus:{{ .Values.monitoring.prometheus.port }}/-/healthy
+          echo "Prometheus OK"
+---
+# ── Test: Grafana healthy ─────────────────────────────────────────────────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-test-grafana
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: grafana-check
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "Checking Grafana at {{ .Release.Name }}-grafana:{{ .Values.monitoring.grafana.port }}..."
+          wget -qO- http://{{ .Release.Name }}-grafana:{{ .Values.monitoring.grafana.port }}/api/health
+          echo "Grafana OK"
+{{- end }}

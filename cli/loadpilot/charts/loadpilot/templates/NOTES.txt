@@ -1,0 +1,62 @@
+LoadPilot has been deployed to namespace {{ .Release.Namespace }}.
+
+── Agents ────────────────────────────────────────────────────────────────────
+
+  {{ .Values.agent.replicas }} agent pod(s) are running and waiting for a plan.
+
+── NATS ──────────────────────────────────────────────────────────────────────
+
+{{- if eq .Values.nats.service.type "LoadBalancer" }}
+  Get the external NATS address (may take a minute to assign):
+
+    export NATS_IP=$(kubectl get svc -n {{ .Release.Namespace }} {{ .Release.Name }}-nats \
+      -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+    echo "nats://$NATS_IP:{{ .Values.nats.port }}"
+
+{{- else }}
+  Forward NATS locally:
+
+    kubectl port-forward -n {{ .Release.Namespace }} svc/{{ .Release.Name }}-nats {{ .Values.nats.port }}:{{ .Values.nats.port }}
+
+  Then connect at: nats://127.0.0.1:{{ .Values.nats.port }}
+{{- end }}
+
+  Run a test against external agents:
+
+    loadpilot run scenarios/checkout.py \
+      --target https://api.example.com \
+      --nats-url nats://<NATS_ADDRESS>:{{ .Values.nats.port }} \
+      --external-agents {{ .Values.agent.replicas }}
+
+{{ if .Values.monitoring.enabled -}}
+── Grafana ───────────────────────────────────────────────────────────────────
+
+{{- if eq .Values.monitoring.grafana.service.type "LoadBalancer" }}
+  Get the Grafana address (may take a minute to assign):
+
+    export GRAFANA_IP=$(kubectl get svc -n {{ .Release.Namespace }} {{ .Release.Name }}-grafana \
+      -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+    echo "http://$GRAFANA_IP:{{ .Values.monitoring.grafana.port }}"
+
+{{- else }}
+  Forward Grafana locally:
+
+    kubectl port-forward -n {{ .Release.Namespace }} svc/{{ .Release.Name }}-grafana {{ .Values.monitoring.grafana.port }}:{{ .Values.monitoring.grafana.port }}
+
+  Then open: http://127.0.0.1:{{ .Values.monitoring.grafana.port }}
+{{- end }}
+
+  Login: admin / <value of monitoring.grafana.adminPassword>
+  The LoadPilot dashboard is pre-provisioned and ready.
+
+{{ end -}}
+── Coordinator scraping ──────────────────────────────────────────────────────
+
+{{- if .Values.monitoring.coordinator.scrapeTarget }}
+  Prometheus will scrape the coordinator at: {{ .Values.monitoring.coordinator.scrapeTarget }}
+  Make sure the coordinator is reachable from inside the cluster at that address.
+  To disable: --set monitoring.coordinator.scrapeTarget=""
+{{- else }}
+  Coordinator scraping is disabled (monitoring.coordinator.scrapeTarget is empty).
+  To enable: --set monitoring.coordinator.scrapeTarget=<host>:9090
+{{- end }}

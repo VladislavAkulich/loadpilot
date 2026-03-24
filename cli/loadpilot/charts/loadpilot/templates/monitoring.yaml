@@ -11,14 +11,30 @@ data:
     global:
       scrape_interval: 5s
     scrape_configs:
+      {{- if .Values.monitoring.coordinator.scrapeTarget }}
       - job_name: loadpilot-coordinator
         static_configs:
-          - targets: ['host.docker.internal:9090']
+          - targets: ['{{ .Values.monitoring.coordinator.scrapeTarget }}']
             labels:
               role: coordinator
+      {{- end }}
+---
+# Headless service required by StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-prometheus-headless
+  namespace: {{ .Release.Namespace }}
+spec:
+  clusterIP: None
+  selector:
+    app: loadpilot-prometheus
+  ports:
+    - port: {{ .Values.monitoring.prometheus.port }}
+      targetPort: {{ .Values.monitoring.prometheus.port }}
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: {{ .Release.Name }}-prometheus
   namespace: {{ .Release.Namespace }}
@@ -27,6 +43,7 @@ metadata:
     app: loadpilot-prometheus
 spec:
   replicas: 1
+  serviceName: {{ .Release.Name }}-prometheus-headless
   selector:
     matchLabels:
       app: loadpilot-prometheus
@@ -35,9 +52,14 @@ spec:
       labels:
         app: loadpilot-prometheus
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: prometheus
           image: {{ .Values.monitoring.prometheus.image }}
+          imagePullPolicy: {{ .Values.monitoring.prometheus.imagePullPolicy }}
           args:
             - "--config.file=/etc/prometheus/prometheus.yml"
             - "--storage.tsdb.retention.time=7d"
@@ -46,12 +68,31 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
           resources:
             {{- toYaml .Values.monitoring.prometheus.resources | nindent 12 }}
       volumes:
         - name: config
           configMap:
             name: {{ .Release.Name }}-prometheus-config
+        {{- if not .Values.monitoring.prometheus.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.monitoring.prometheus.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if .Values.monitoring.prometheus.persistence.storageClass }}
+        storageClassName: {{ .Values.monitoring.prometheus.persistence.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.monitoring.prometheus.persistence.size }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -105,9 +146,23 @@ data:
   loadpilot.json: |
 {{ .Files.Get "files/grafana-dashboard.json" | indent 4 }}
 ---
+# Headless service required by StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-grafana-headless
+  namespace: {{ .Release.Namespace }}
+spec:
+  clusterIP: None
+  selector:
+    app: loadpilot-grafana
+  ports:
+    - port: {{ .Values.monitoring.grafana.port }}
+      targetPort: {{ .Values.monitoring.grafana.port }}
+---
 # ── Grafana ───────────────────────────────────────────────────────────────────
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: {{ .Release.Name }}-grafana
   namespace: {{ .Release.Namespace }}
@@ -116,6 +171,7 @@ metadata:
     app: loadpilot-grafana
 spec:
   replicas: 1
+  serviceName: {{ .Release.Name }}-grafana-headless
   selector:
     matchLabels:
       app: loadpilot-grafana
@@ -124,14 +180,22 @@ spec:
       labels:
         app: loadpilot-grafana
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: grafana
           image: {{ .Values.monitoring.grafana.image }}
+          imagePullPolicy: {{ .Values.monitoring.grafana.imagePullPolicy }}
           ports:
             - containerPort: {{ .Values.monitoring.grafana.port }}
           env:
             - name: GF_SECURITY_ADMIN_PASSWORD
-              value: {{ .Values.monitoring.grafana.adminPassword | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-grafana-secret
+                  key: admin-password
             - name: GF_AUTH_ANONYMOUS_ENABLED
               value: "true"
             - name: GF_AUTH_ANONYMOUS_ORG_ROLE
@@ -143,6 +207,8 @@ spec:
               mountPath: /etc/grafana/provisioning/dashboards
             - name: dashboards-json
               mountPath: /var/lib/grafana/dashboards
+            - name: data
+              mountPath: /var/lib/grafana
           resources:
             {{- toYaml .Values.monitoring.grafana.resources | nindent 12 }}
       volumes:
@@ -155,6 +221,23 @@ spec:
         - name: dashboards-json
           configMap:
             name: {{ .Release.Name }}-grafana-dashboard-json
+        {{- if not .Values.monitoring.grafana.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.monitoring.grafana.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if .Values.monitoring.grafana.persistence.storageClass }}
+        storageClassName: {{ .Values.monitoring.grafana.persistence.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.monitoring.grafana.persistence.size }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: Service

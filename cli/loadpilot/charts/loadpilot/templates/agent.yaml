@@ -16,9 +16,14 @@ spec:
       labels:
         app: loadpilot-agent
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: agent
           image: {{ .Values.agent.image }}:{{ .Values.agent.tag }}
+          imagePullPolicy: {{ .Values.agent.imagePullPolicy }}
           args:
             - "--coordinator"
             - "{{ .Release.Name }}-nats:{{ .Values.nats.port }}"
@@ -29,5 +34,21 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+          {{- if .Values.agent.livenessProbe.enabled }}
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "kill -0 1"]
+            initialDelaySeconds: {{ .Values.agent.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.agent.livenessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.agent.livenessProbe.failureThreshold }}
+          {{- end }}
+          {{- if .Values.agent.readinessProbe.enabled }}
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "kill -0 1"]
+            initialDelaySeconds: {{ .Values.agent.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.agent.readinessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.agent.readinessProbe.failureThreshold }}
+          {{- end }}
           resources:
             {{- toYaml .Values.agent.resources | nindent 12 }}

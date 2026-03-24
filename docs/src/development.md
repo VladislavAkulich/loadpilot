@@ -91,7 +91,7 @@ cargo install cargo-llvm-cov
 rustup component add llvm-tools-preview
 ```
 
-## Helm Chart (in progress)
+## Helm Chart
 
 A Helm chart for deploying the distributed agent stack to Kubernetes is located at
 `cli/loadpilot/charts/loadpilot/`. It is **not yet published** to a Helm repository
@@ -101,38 +101,100 @@ but can be installed directly from the source tree.
 
 | Component | Description |
 |---|---|
-| `loadpilot-nats` | Embedded NATS broker (single-node) |
-| `loadpilot-agent` | N agent pods (configurable replicas) |
+| `loadpilot-nats` | NATS broker (single-node, LoadBalancer) |
+| `loadpilot-agent` | N agent pods — connect to NATS and wait for plans |
 | `loadpilot-prometheus` | Prometheus scraping coordinator metrics |
 | `loadpilot-grafana` | Grafana with pre-provisioned LoadPilot dashboard |
 
 ### Local install (kind / minikube)
 
 ```bash
-# Build and load images
+# Build and load agent image
 docker build -f Dockerfile.agent -t loadpilot-agent:local .
-docker build -f Dockerfile.coordinator -t loadpilot-coordinator:local .
 kind load docker-image loadpilot-agent:local --name <cluster-name>
 
 # Install chart
 helm install loadpilot cli/loadpilot/charts/loadpilot \
   --namespace loadpilot --create-namespace \
   --set agent.image=loadpilot-agent \
-  --set agent.tag=local
+  --set agent.tag=local \
+  --set agent.imagePullPolicy=Never \
+  --set monitoring.coordinator.scrapeTarget=""
 
 # Forward NATS + Grafana
 kubectl port-forward -n loadpilot svc/loadpilot-nats 4222:4222
 kubectl port-forward -n loadpilot svc/loadpilot-grafana 3000:3000
 ```
 
-### Known limitations (not yet production-ready)
+Run a test against the in-cluster agents:
 
-- Prometheus scrape target is hardcoded to `host.docker.internal:9090` (coordinator
-  runs locally and is not deployed to k8s)
-- No `imagePullSecrets` support (add manually for private registries)
-- Grafana admin password stored in `values.yaml` plaintext (no Secret)
-- No PVC for Grafana / Prometheus — data lost on pod restart
-- No `NOTES.txt` post-install instructions
+```bash
+loadpilot run scenarios/checkout.py \
+  --target https://api.example.com \
+  --nats-url nats://127.0.0.1:4222 \
+  --external-agents <replicas>
+```
+
+### Key values
+
+| Value | Default | Description |
+|---|---|---|
+| `agent.replicas` | `3` | Number of agent pods |
+| `agent.imagePullPolicy` | `IfNotPresent` | Use `Always` with `latest` tag in prod |
+| `agent.livenessProbe.enabled` | `true` | Restart pod if agent process hangs |
+| `agent.readinessProbe.enabled` | `true` | Mark pod ready once process is up |
+| `imagePullSecrets` | `[]` | Secrets for private registries |
+| `nats.service.type` | `LoadBalancer` | `NodePort` for bare-metal / minikube |
+| `monitoring.enabled` | `true` | Deploy Prometheus + Grafana |
+| `monitoring.coordinator.scrapeTarget` | `host.docker.internal:9090` | Set `""` in cloud (coordinator not in cluster) |
+| `monitoring.grafana.adminPassword` | `admin` | Stored in a Kubernetes Secret |
+| `monitoring.prometheus.persistence.enabled` | `false` | Enable PVC for Prometheus data |
+| `monitoring.grafana.persistence.enabled` | `false` | Enable PVC for Grafana data |
+
+### Enabling persistence
+
+```bash
+helm upgrade loadpilot cli/loadpilot/charts/loadpilot \
+  --set monitoring.prometheus.persistence.enabled=true \
+  --set monitoring.prometheus.persistence.size=20Gi \
+  --set monitoring.grafana.persistence.enabled=true
+```
+
+### Private registry
+
+```bash
+helm install loadpilot cli/loadpilot/charts/loadpilot \
+  --set "imagePullSecrets[0].name=my-registry-secret"
+```
+
+### Verifying the deployment
+
+After install or upgrade, run the built-in smoke tests:
+
+```bash
+helm test loadpilot --namespace loadpilot
+```
+
+| Test | What it checks |
+|---|---|
+| `loadpilot-test-nats` | TCP connectivity to NATS on port 4222 |
+| `loadpilot-test-prometheus` | Prometheus `/-/healthy` returns 200 |
+| `loadpilot-test-grafana` | Grafana `/api/health` returns 200 |
+
+### Installing from OCI registry
+
+After a release tag is pushed, the chart is published automatically to
+`ghcr.io/vladislavakul ich/charts/loadpilot`:
+
+```bash
+helm install loadpilot oci://ghcr.io/vladislavakul ich/charts/loadpilot \
+  --version 0.1.7 \
+  --namespace loadpilot --create-namespace
+```
+
+### Known limitations
+
+- Coordinator runs locally, not in the cluster — Prometheus scraping requires `host.docker.internal` or explicit IP
 
 ## Benchmark
 

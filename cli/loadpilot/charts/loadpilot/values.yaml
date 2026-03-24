@@ -1,7 +1,27 @@
+# imagePullSecrets: list of Secret names for pulling images from private registries.
+# Example:
+#   imagePullSecrets:
+#     - name: my-registry-secret
+imagePullSecrets: []
+
 agent:
   replicas: 3
   image: ghcr.io/vladislavakul ich/loadpilot-agent
   tag: latest
+  imagePullPolicy: IfNotPresent
+  # Liveness probe: restart the pod if the agent process hangs or dies.
+  # Uses exec (agent has no HTTP port). Set enabled: false to disable.
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 15
+    failureThreshold: 3
+  # Readiness probe: mark the pod ready once the agent process is up.
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
   resources:
     requests:
       cpu: 500m
@@ -12,6 +32,7 @@ agent:
 
 nats:
   image: nats:2.10-alpine
+  imagePullPolicy: IfNotPresent
   service:
     # LoadBalancer — external IP (EKS, AKS, GKE, DOKS)
     # NodePort     — for bare-metal / minikube
@@ -28,9 +49,20 @@ nats:
 monitoring:
   enabled: true
 
+  coordinator:
+    # Address Prometheus uses to scrape coordinator metrics.
+    # Set to "" to disable coordinator scraping (e.g. cloud deployments where
+    # the coordinator is not reachable from inside the cluster).
+    scrapeTarget: "host.docker.internal:9090"
+
   prometheus:
     image: prom/prometheus:v2.51.0
+    imagePullPolicy: IfNotPresent
     port: 9090
+    persistence:
+      enabled: false
+      storageClass: ""   # "" = cluster default
+      size: 10Gi
     resources:
       requests:
         cpu: 100m
@@ -41,7 +73,12 @@ monitoring:
 
   grafana:
     image: grafana/grafana:10.4.0
+    imagePullPolicy: IfNotPresent
     port: 3000
+    persistence:
+      enabled: false
+      storageClass: ""   # "" = cluster default
+      size: 1Gi
     service:
       type: LoadBalancer
     adminPassword: admin

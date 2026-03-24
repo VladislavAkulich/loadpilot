@@ -16,9 +16,14 @@ spec:
       labels:
         app: loadpilot-nats
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: nats
           image: {{ .Values.nats.image }}
+          imagePullPolicy: {{ .Values.nats.imagePullPolicy }}
           ports:
             - containerPort: {{ .Values.nats.port }}
           resources:
