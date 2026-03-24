@@ -1,0 +1,10 @@
+[package]
+name = "nats-client"
+version = "0.1.7"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+rustls-native-certs = "0.7"
+anyhow = "1"

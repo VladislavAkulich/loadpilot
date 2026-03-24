@@ -446,7 +446,13 @@ def run_command(
     nats_url: Optional[str] = typer.Option(
         None,
         "--nats-url",
-        help="External NATS URL for remote agents (e.g. nats://host:4222). Use with --external-agents.",
+        help="External NATS URL for remote agents (e.g. nats://host:4222 or tls://host:4222). Use with --external-agents.",
+    ),
+    nats_token: Optional[str] = typer.Option(
+        None,
+        "--nats-token",
+        envvar="NATS_TOKEN",
+        help="Token for NATS authentication. Can also be set via NATS_TOKEN env var.",
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print the test plan JSON and exit without running."
@@ -598,6 +604,8 @@ def run_command(
     coordinator_cmd = [str(coordinator)]
     if nats_url:
         coordinator_cmd += ["--nats-url", nats_url, "--external-agents", str(external_agents or 1)]
+        if nats_token:
+            coordinator_cmd += ["--nats-token", nats_token]
     elif external_agents > 0:
         coordinator_cmd += ["--external-agents", str(external_agents)]
     elif agents > 1:

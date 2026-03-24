@@ -1,3 +1,3 @@
 [workspace]
-members = ["coordinator", "agent"]
+members = ["coordinator", "agent", "nats-client"]
 resolver = "2"

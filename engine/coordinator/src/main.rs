@@ -31,8 +31,14 @@ struct Args {
     /// Connect to an external NATS server instead of starting an embedded broker.
     /// Must be used together with --external-agents N.
     /// Example: --nats-url nats://my-nats.railway.app:4222
+    ///          --nats-url tls://my-nats.railway.app:4222
     #[arg(long)]
     nats_url: Option<String>,
+
+    /// Token for NATS authentication (used with --nats-url).
+    /// Can also be set via the NATS_TOKEN environment variable.
+    #[arg(long, env = "NATS_TOKEN")]
+    nats_token: Option<String>,
 
     /// Embedded broker address (used in local and external-agents modes).
     #[arg(long, default_value = "127.0.0.1:4222")]
@@ -66,8 +72,14 @@ async fn main() -> Result<()> {
                 "--nats-url requires --external-agents N (how many remote agents to wait for)"
             );
         }
-        distributed::run_with_nats_url(plan, args.external_agents, &nats_url, shared_snapshot)
-            .await?;
+        distributed::run_with_nats_url(
+            plan,
+            args.external_agents,
+            &nats_url,
+            args.nats_token.as_deref(),
+            shared_snapshot,
+        )
+        .await?;
     } else if args.local_agents > 0 {
         distributed::run(plan, args.local_agents, &args.broker_addr, shared_snapshot).await?;
     } else if args.external_agents > 0 {

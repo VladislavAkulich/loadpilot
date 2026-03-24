@@ -486,15 +486,17 @@ pub async fn run_with_nats_url(
     plan: ScenarioPlan,
     n_agents: usize,
     nats_url: &str,
+    token: Option<&str>,
     shared_snapshot: SharedSnapshot,
 ) -> Result<()> {
     use crate::nats_client::NatsClient;
 
     eprintln!("[distributed] connecting to external NATS at {nats_url}");
-    let addr = nats_url.strip_prefix("nats://").unwrap_or(nats_url);
-    let mut nats = NatsClient::connect(addr)
-        .await
-        .with_context(|| format!("Failed to connect to NATS at {nats_url}"))?;
+    let mut nats = match token {
+        Some(t) => NatsClient::connect_authenticated(nats_url, t).await,
+        None => NatsClient::connect(nats_url).await,
+    }
+    .with_context(|| format!("Failed to connect to NATS at {nats_url}"))?;
 
     nats.subscribe(subject_register(), "reg").await?;
     nats.subscribe(subject_metrics(), "metrics").await?;

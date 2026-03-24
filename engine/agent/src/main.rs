@@ -22,7 +22,7 @@ use crate::runner::run_load;
 #[derive(Parser)]
 #[command(name = "agent")]
 struct Args {
-    /// NATS broker address (coordinator's embedded broker or external NATS).
+    /// NATS broker address. Supports nats://, tls://, or bare host:port.
     #[arg(long)]
     coordinator: String,
 
@@ -33,6 +33,10 @@ struct Args {
     /// Optional: run ID passed by coordinator (informational only, not required).
     #[arg(long, default_value = "")]
     run_id: String,
+
+    /// Token for NATS authentication. Can also be set via NATS_TOKEN env var.
+    #[arg(long, env = "NATS_TOKEN")]
+    nats_token: Option<String>,
 }
 
 // ── Wire types ────────────────────────────────────────────────────────────────
@@ -85,7 +89,10 @@ async fn main() -> Result<()> {
 }
 
 async fn run_once(args: &Args) -> Result<()> {
-    let mut nats = NatsClient::connect(&args.coordinator).await?;
+    let mut nats = match args.nats_token.as_deref() {
+        Some(token) => NatsClient::connect_authenticated(&args.coordinator, token).await,
+        None => NatsClient::connect(&args.coordinator).await,
+    }?;
 
     let shard_subject = format!("loadpilot.shard.{}", args.agent_id);
     let metrics_subject = format!("loadpilot.metrics.{}", args.agent_id);
