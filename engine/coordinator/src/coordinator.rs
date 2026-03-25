@@ -21,7 +21,7 @@ use tokio::time::sleep;
 
 use std::sync::RwLock;
 
-use crate::metrics::{LatencySnapshot, Metrics};
+use crate::metrics::{LatencySnapshot, MetricSink, Metrics, TaskSnapshot};
 use crate::plan::{Mode, ScenarioPlan, TaskPlan};
 use crate::python_bridge::PythonBridge;
 
@@ -49,6 +49,9 @@ pub struct MetricsSnapshot {
     pub active_workers: u64,
     pub latency: LatencySnapshot,
     pub phase: Phase,
+    /// Per-task breakdown; empty when running single-task plans.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<TaskSnapshot>,
 }
 
 pub struct Coordinator {
@@ -64,7 +67,7 @@ impl Coordinator {
         }
     }
 
-    pub async fn run(self, shared_snapshot: SharedSnapshot) -> Result<()> {
+    pub async fn run(self, shared_snapshot: SharedSnapshot, sink: MetricSink) -> Result<()> {
         let plan = Arc::new(self.plan);
         let metrics = self.metrics;
 
@@ -164,6 +167,7 @@ impl Coordinator {
         let active_clone = active_workers.clone();
         let done_clone = done_flag.clone();
         let snapshot_writer = Arc::clone(&shared_snapshot);
+        let sink_reporter = Arc::clone(&sink);
         let reporter_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
@@ -196,10 +200,11 @@ impl Coordinator {
                         mean_ms: metrics_reporter.histogram.mean_ms(),
                     },
                     phase,
+                    tasks: metrics_reporter.task_snapshots(),
                 };
 
                 if let Ok(line) = serde_json::to_string(&snap) {
-                    println!("{}", line);
+                    sink_reporter(line.clone());
                 }
 
                 if let Ok(mut guard) = snapshot_writer.write() {
@@ -270,7 +275,7 @@ impl Coordinator {
                         match b.run_task(vuser_idx, task_name.clone()).await {
                             Ok(calls) => {
                                 if calls.is_empty() {
-                                    metrics_task.record_error(0);
+                                    metrics_task.record_error_task(&task_name, 0);
                                 } else {
                                     for cr in calls {
                                         if let Some(ref err) = cr.error {
@@ -280,16 +285,18 @@ impl Coordinator {
                                             );
                                         }
                                         if cr.success {
-                                            metrics_task.record_success(cr.elapsed_ms);
+                                            metrics_task
+                                                .record_success_task(&task_name, cr.elapsed_ms);
                                         } else {
-                                            metrics_task.record_error(cr.elapsed_ms);
+                                            metrics_task
+                                                .record_error_task(&task_name, cr.elapsed_ms);
                                         }
                                     }
                                 }
                             }
                             Err(e) => {
                                 eprintln!("[loadpilot] run_task error: {}", e);
-                                metrics_task.record_error(0);
+                                metrics_task.record_error_task(&task_name, 0);
                             }
                         }
                         active_clone2.fetch_sub(1, Ordering::Relaxed);
@@ -314,8 +321,10 @@ impl Coordinator {
                                 .await;
                         let latency_ms = t0.elapsed().as_millis() as u64;
                         match result {
-                            Ok(r) if r.status < 400 => metrics_task.record_success(latency_ms),
-                            _ => metrics_task.record_error(latency_ms),
+                            Ok(r) if r.status < 400 => {
+                                metrics_task.record_success_task(&task_name, latency_ms)
+                            }
+                            _ => metrics_task.record_error_task(&task_name, latency_ms),
                         }
                         active_clone2.fetch_sub(1, Ordering::Relaxed);
                     });
@@ -360,9 +369,10 @@ impl Coordinator {
                 mean_ms: metrics.histogram.mean_ms(),
             },
             phase: Phase::Done,
+            tasks: metrics.task_snapshots(),
         };
         if let Ok(line) = serde_json::to_string(&snap) {
-            println!("{}", line);
+            sink(line.clone());
         }
 
         let _ = reporter_handle.await;

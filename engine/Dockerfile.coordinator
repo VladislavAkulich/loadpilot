@@ -1,0 +1,28 @@
+# LoadPilot coordinator — Docker image for k8s deployments.
+#
+# Build (from repo root):
+#   docker build -f engine/Dockerfile.coordinator -t loadpilot-coordinator .
+#
+# Run in serve mode (default for k8s):
+#   docker run -e NATS_URL=nats://nats:4222 -e SERVE_AGENTS=2 loadpilot-coordinator
+
+FROM rust:1.85-slim AS builder
+
+RUN apt-get update && apt-get install -y pkg-config libssl-dev python3-dev && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY engine/ .
+
+RUN cargo build --release --package coordinator
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates libpython3.11 && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/coordinator /usr/local/bin/loadpilot-coordinator
+RUN chmod +x /usr/local/bin/loadpilot-coordinator
+
+ENV NATS_URL=nats://localhost:4222
+ENV SERVE_AGENTS=1
+
+CMD ["sh", "-c", "exec loadpilot-coordinator --serve --nats-url \"$NATS_URL\" --serve-agents \"$SERVE_AGENTS\""]

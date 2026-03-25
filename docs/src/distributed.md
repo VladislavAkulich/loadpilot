@@ -51,6 +51,51 @@ The coordinator uses an embedded NATS broker listening on `:4222` by default.
 
 ---
 
+## Coordinator as a Kubernetes service
+
+Deploy the coordinator as a long-running pod inside the cluster. It exposes an
+HTTP API (`POST /run`) that accepts a plan JSON and streams metric ndjson back.
+Prometheus scrapes metrics at `:9090` in-cluster — no host networking required.
+
+```bash
+# Build coordinator image
+docker build -f engine/Dockerfile.coordinator -t loadpilot-coordinator:local .
+kind load docker-image loadpilot-coordinator:local --name <cluster-name>
+
+# Enable in Helm
+helm upgrade loadpilot cli/loadpilot/charts/loadpilot -n loadpilot \
+  --reuse-values \
+  --set coordinator.enabled=true \
+  --set coordinator.image=loadpilot-coordinator \
+  --set coordinator.tag=local \
+  --set coordinator.imagePullPolicy=Never
+
+# Port-forward the API and run
+kubectl port-forward -n loadpilot svc/loadpilot-coordinator 8080:8080
+loadpilot run scenarios/checkout.py \
+  --target https://api.example.com \
+  --coordinator-url http://localhost:8080
+```
+
+The coordinator uses the agents already running in-cluster (controlled by
+`agent.replicas`). The CLI streams the live dashboard exactly as in local mode.
+
+You can also set the URL via environment variable:
+
+```bash
+export LOADPILOT_COORDINATOR_URL=http://localhost:8080
+loadpilot run scenarios/checkout.py --target https://api.example.com
+```
+
+### Coordinator HTTP API
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/run` | `POST` | Accept plan JSON, stream ndjson metric lines. Returns `409` if a test is already running. |
+| `/healthz` | `GET` | Readiness probe — returns `ok`. |
+
+---
+
 ## External NATS (Railway / cloud)
 
 Deploy a NATS server separately (e.g. Railway, Fly.io, or a VPS):
@@ -171,21 +216,24 @@ pre-auth phase.
 
 ```
 CLI (Python)
-  build plan → spawn coordinator
-        │
-        ▼ stdin (JSON)
+  build plan ──► spawn coordinator subprocess   (local mode)
+                   │ stdin (JSON)
+               OR
+  build plan ──► POST /run to coordinator pod   (--coordinator-url)
+                   │ HTTP ndjson stream
+                   ▼
 Coordinator (Rust)
   ├── embedded NATS broker  (or connect to external NATS)
   ├── wait for N agents to register
   ├── shard plan + set synchronised start_at → publish to each agent
-  ├── aggregate metrics (sum RPS, histogram-merged percentiles)
-  ├── stdout JSON lines → CLI live dashboard
+  ├── aggregate metrics (sum RPS, histogram-merged percentiles, per-task)
+  ├── stdout / HTTP ndjson → CLI live dashboard
   └── :9090/metrics → Prometheus / Grafana
 
-Agent (Rust, one per machine)
+Agent (Rust, one per machine or k8s pod)
   ├── connect to NATS → register → receive shard
   ├── sleep until start_at (clock sync)
   ├── run HTTP load (token-bucket + reqwest)
-  ├── stream metrics → NATS → coordinator
+  ├── stream metrics + per-task histograms → NATS → coordinator
   └── reconnect and wait for next plan
 ```

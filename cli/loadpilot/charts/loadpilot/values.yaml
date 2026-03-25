@@ -30,6 +30,12 @@ agent:
       cpu: 2000m
       memory: 512Mi
 
+coordinator:
+  enabled: false
+  image: loadpilot-coordinator
+  tag: local
+  imagePullPolicy: Never
+
 nats:
   image: nats:2.10-alpine
   imagePullPolicy: IfNotPresent

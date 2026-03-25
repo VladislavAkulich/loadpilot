@@ -11,12 +11,22 @@ pub struct LatencySnapshot {
     pub mean_ms: f64,
 }
 
+/// Per-task metrics snapshot included in every reporting interval.
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct TaskSnapshot {
+    pub name: String,
+    pub requests: u64,
+    pub errors: u64,
+    pub latency: LatencySnapshot,
+}
+
 /// In-memory latency histogram and request counters.
 ///
 /// Uses a simple HDR-style bucket array (1ms buckets up to 10s) for
 /// percentile calculations without pulling in a heavy dependency.
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 const MAX_LATENCY_MS: usize = 10_000; // 10 seconds
 
@@ -127,6 +137,42 @@ impl LatencyHistogram {
     }
 }
 
+// ── Per-task entry ────────────────────────────────────────────────────────────
+
+struct TaskEntry {
+    histogram: LatencyHistogram,
+    requests: AtomicU64,
+    errors: AtomicU64,
+}
+
+impl TaskEntry {
+    fn new() -> Self {
+        Self {
+            histogram: LatencyHistogram::new(),
+            requests: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+        }
+    }
+
+    fn snapshot(&self, name: String) -> TaskSnapshot {
+        TaskSnapshot {
+            name,
+            requests: self.requests.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
+            latency: LatencySnapshot {
+                p50_ms: self.histogram.percentile(0.50),
+                p95_ms: self.histogram.percentile(0.95),
+                p99_ms: self.histogram.percentile(0.99),
+                max_ms: self.histogram.max_ms(),
+                min_ms: self.histogram.min_ms(),
+                mean_ms: self.histogram.mean_ms(),
+            },
+        }
+    }
+}
+
+// ── Shared metrics ────────────────────────────────────────────────────────────
+
 /// Shared metrics state accessed by all worker tasks and the reporter.
 pub struct Metrics {
     pub histogram: Arc<LatencyHistogram>,
@@ -136,6 +182,8 @@ pub struct Metrics {
     pub window_requests: Arc<AtomicU64>,
     /// Errors in the current 1-second window
     pub window_errors: Arc<AtomicU64>,
+    /// Per-task counters; lazily populated on first record for each task name.
+    per_task: Arc<RwLock<HashMap<String, Arc<TaskEntry>>>>,
 }
 
 impl Metrics {
@@ -146,6 +194,7 @@ impl Metrics {
             errors_total: Arc::new(AtomicU64::new(0)),
             window_requests: Arc::new(AtomicU64::new(0)),
             window_errors: Arc::new(AtomicU64::new(0)),
+            per_task: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -161,6 +210,50 @@ impl Metrics {
         self.errors_total.fetch_add(1, Ordering::Relaxed);
         self.window_requests.fetch_add(1, Ordering::Relaxed);
         self.window_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a successful request and attribute it to `task`.
+    pub fn record_success_task(&self, task: &str, latency_ms: u64) {
+        self.record_success(latency_ms);
+        let entry = self.get_or_create_task(task);
+        entry.histogram.record(latency_ms);
+        entry.requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a failed request and attribute it to `task`.
+    pub fn record_error_task(&self, task: &str, latency_ms: u64) {
+        self.record_error(latency_ms);
+        let entry = self.get_or_create_task(task);
+        entry.histogram.record(latency_ms);
+        entry.requests.fetch_add(1, Ordering::Relaxed);
+        entry.errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn get_or_create_task(&self, task: &str) -> Arc<TaskEntry> {
+        // Fast path: entry already exists, read lock only.
+        if let Ok(guard) = self.per_task.read() {
+            if let Some(e) = guard.get(task) {
+                return Arc::clone(e);
+            }
+        }
+        // Slow path: first time seeing this task name.
+        let mut guard = self.per_task.write().unwrap();
+        Arc::clone(
+            guard
+                .entry(task.to_string())
+                .or_insert_with(|| Arc::new(TaskEntry::new())),
+        )
+    }
+
+    /// Snapshot per-task metrics, sorted by task name.
+    pub fn task_snapshots(&self) -> Vec<TaskSnapshot> {
+        let guard = self.per_task.read().unwrap();
+        let mut snaps: Vec<TaskSnapshot> = guard
+            .iter()
+            .map(|(name, entry)| entry.snapshot(name.clone()))
+            .collect();
+        snaps.sort_by(|a, b| a.name.cmp(&b.name));
+        snaps
     }
 
     pub fn drain_window(&self) -> (u64, u64) {
@@ -284,6 +377,48 @@ mod tests {
         m.record_success(42);
         assert_eq!(m2.requests_total.load(Ordering::Relaxed), 1);
     }
+
+    #[test]
+    fn task_snapshot_tracks_per_task() {
+        let m = Metrics::new();
+        m.record_success_task("login", 50);
+        m.record_success_task("login", 100);
+        m.record_error_task("search", 200);
+
+        assert_eq!(m.requests_total.load(Ordering::Relaxed), 3);
+
+        let snaps = m.task_snapshots();
+        assert_eq!(snaps.len(), 2);
+
+        let login = snaps.iter().find(|s| s.name == "login").unwrap();
+        assert_eq!(login.requests, 2);
+        assert_eq!(login.errors, 0);
+        assert!(login.latency.mean_ms > 0.0);
+
+        let search = snaps.iter().find(|s| s.name == "search").unwrap();
+        assert_eq!(search.requests, 1);
+        assert_eq!(search.errors, 1);
+    }
+
+    #[test]
+    fn task_snapshots_shared_across_clones() {
+        let m = Metrics::new();
+        let m2 = m.clone();
+        m.record_success_task("t1", 10);
+        // Clone shares the same per_task map.
+        let snaps = m2.task_snapshots();
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].name, "t1");
+    }
+}
+
+/// Sink for metric JSON lines. Writes to stdout in normal mode,
+/// sends to a channel in serve mode.
+pub type MetricSink = std::sync::Arc<dyn Fn(String) + Send + Sync>;
+
+/// Returns a sink that writes metric lines to stdout (default behaviour).
+pub fn stdout_sink() -> MetricSink {
+    std::sync::Arc::new(|line| println!("{}", line))
 }
 
 impl Clone for Metrics {
@@ -294,6 +429,7 @@ impl Clone for Metrics {
             errors_total: self.errors_total.clone(),
             window_requests: self.window_requests.clone(),
             window_errors: self.window_errors.clone(),
+            per_task: self.per_task.clone(),
         }
     }
 }

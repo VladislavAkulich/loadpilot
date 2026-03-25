@@ -11,7 +11,13 @@ data:
     global:
       scrape_interval: 5s
     scrape_configs:
-      {{- if .Values.monitoring.coordinator.scrapeTarget }}
+      {{- if .Values.coordinator.enabled }}
+      - job_name: loadpilot-coordinator
+        static_configs:
+          - targets: ['{{ .Release.Name }}-coordinator:9090']
+            labels:
+              role: coordinator
+      {{- else if .Values.monitoring.coordinator.scrapeTarget }}
       - job_name: loadpilot-coordinator
         static_configs:
           - targets: ['{{ .Values.monitoring.coordinator.scrapeTarget }}']

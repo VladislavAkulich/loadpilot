@@ -247,12 +247,97 @@
       ],
       "title": "Cumulative Requests & Errors",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
+      "id": 20,
+      "title": "Per Task",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 5 },
+          "unit": "ms"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "id": 21,
+      "options": {
+        "legend": { "calcs": ["last", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "loadpilot_task_latency_p99_ms{task=~\"$task\"}",
+          "legendFormat": "{{task}} p99"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "loadpilot_task_latency_p50_ms{task=~\"$task\"}",
+          "legendFormat": "{{task}} p50"
+        }
+      ],
+      "title": "Latency by Task (p50 / p99)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "percent",
+          "min": 0
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "id": 22,
+      "options": {
+        "legend": { "calcs": ["last", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "loadpilot_task_errors_total{task=~\"$task\"} / loadpilot_task_requests_total{task=~\"$task\"} * 100",
+          "legendFormat": "{{task}}"
+        }
+      ],
+      "title": "Error Rate by Task %",
+      "type": "timeseries"
     }
   ],
   "refresh": "5s",
   "schemaVersion": 38,
   "tags": ["loadpilot", "performance"],
-  "templating": { "list": [] },
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(loadpilot_task_latency_p99_ms, task)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "task",
+        "options": [],
+        "query": {
+          "query": "label_values(loadpilot_task_latency_p99_ms, task)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query",
+        "label": "Task"
+      }
+    ]
+  },
   "time": { "from": "now-5m", "to": "now" },
   "timepicker": {},
   "timezone": "browser",

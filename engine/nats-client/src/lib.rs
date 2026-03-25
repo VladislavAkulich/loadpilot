@@ -157,9 +157,7 @@ fn build_connect(tls: bool, token: Option<&str>) -> String {
         Some(t) => format!(",\"auth_token\":\"{}\"", t.replace('"', "\\\"")),
         None => String::new(),
     };
-    format!(
-        "CONNECT {{\"verbose\":false,\"pedantic\":false,\"tls_required\":{tls}{auth}}}\r\n"
-    )
+    format!("CONNECT {{\"verbose\":false,\"pedantic\":false,\"tls_required\":{tls}{auth}}}\r\n")
 }
 
 // ── Writer task ───────────────────────────────────────────────────────────────

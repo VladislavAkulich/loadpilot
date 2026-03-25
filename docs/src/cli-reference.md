@@ -35,6 +35,7 @@ loadpilot run scenarios/checkout.py --target https://api.example.com
 | `--threshold`       | from `@scenario`        | Override an SLA threshold at run time: `--threshold p99_ms=500` |
 | `--results-json`    | off                     | Write final metrics as JSON to this path |
 | `--save-baseline`   | off                     | Save results as baseline to `.loadpilot/baseline.json` |
+| `--coordinator-url` | —                       | URL of an in-cluster coordinator (`POST /run`). When set the coordinator runs as a k8s pod instead of a local subprocess. Also readable from `LOADPILOT_COORDINATOR_URL`. |
 
 ### Examples
 
@@ -68,6 +69,12 @@ loadpilot run scenarios/checkout.py --target https://api.example.com --dry-run
 
 # save baseline for future comparisons
 loadpilot run scenarios/checkout.py --target https://api.example.com --save-baseline
+
+# run via in-cluster coordinator (k8s)
+kubectl port-forward -n loadpilot svc/loadpilot-coordinator 8080:8080
+loadpilot run scenarios/checkout.py \
+  --target https://api.example.com \
+  --coordinator-url http://localhost:8080
 ```
 
 ---

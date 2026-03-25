@@ -16,7 +16,7 @@ use tokio::{
 use crate::{
     broker,
     coordinator::{MetricsSnapshot, Phase, SharedSnapshot},
-    metrics::LatencySnapshot,
+    metrics::{LatencySnapshot, MetricSink, TaskSnapshot},
     plan::ScenarioPlan,
 };
 
@@ -51,6 +51,16 @@ struct ShardMsg {
     start_at_unix_ms: u64,
 }
 
+/// Wire type for per-task data received from agents (matches agent's TaskWireSnapshot).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct TaskWireSnapshot {
+    name: String,
+    requests: u64,
+    errors: u64,
+    latency: LatencySnapshot,
+    histogram_buckets: Vec<[u64; 2]>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct AgentMetricsMsg {
     agent_id: String,
@@ -65,6 +75,9 @@ struct AgentMetricsMsg {
     /// Sparse histogram: each entry is [bucket_index_ms, count].
     #[serde(default)]
     histogram_buckets: Vec<[u64; 2]>,
+    /// Per-task breakdown.
+    #[serde(default)]
+    task_snapshots: Vec<TaskWireSnapshot>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -85,6 +98,9 @@ struct AggregatedSnapshot {
     active_workers: u64,
     phase: String,
     latency: LatencySnapshot,
+    /// Per-task breakdown aggregated across all agents.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tasks: Vec<TaskSnapshot>,
 }
 
 const MAX_BUCKET: usize = 10_000;
@@ -104,6 +120,67 @@ fn percentile_from_merged(buckets: &[u64; MAX_BUCKET + 1], total: u64, p: f64) -
     MAX_BUCKET as f64
 }
 
+/// Merge per-task snapshots from all agents into aggregated TaskSnapshot list.
+fn aggregate_tasks(snapshots: &[AgentMetricsMsg]) -> Vec<TaskSnapshot> {
+    // task name → (merged_histogram, total_requests, total_errors, weighted_latency_sum)
+    let mut map: std::collections::HashMap<String, ([u64; MAX_BUCKET + 1], u64, u64, f64)> =
+        std::collections::HashMap::new();
+
+    for snap in snapshots {
+        for ts in &snap.task_snapshots {
+            let entry = map
+                .entry(ts.name.clone())
+                .or_insert_with(|| ([0u64; MAX_BUCKET + 1], 0, 0, 0.0));
+            for &[idx, count] in &ts.histogram_buckets {
+                entry.0[(idx as usize).min(MAX_BUCKET)] += count;
+            }
+            entry.1 += ts.requests;
+            entry.2 += ts.errors;
+            entry.3 += ts.latency.mean_ms * ts.requests as f64;
+        }
+    }
+
+    let mut tasks: Vec<TaskSnapshot> = map
+        .into_iter()
+        .map(|(name, (buckets, requests, errors, weighted_sum))| {
+            let mean_ms = if requests > 0 {
+                weighted_sum / requests as f64
+            } else {
+                0.0
+            };
+            // Derive max/min from merged histogram.
+            let max_ms = buckets
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, &c)| c > 0)
+                .map(|(i, _)| i as f64)
+                .unwrap_or(0.0);
+            let min_ms = buckets
+                .iter()
+                .enumerate()
+                .find(|(_, &c)| c > 0)
+                .map(|(i, _)| i as f64)
+                .unwrap_or(0.0);
+            TaskSnapshot {
+                name,
+                requests,
+                errors,
+                latency: LatencySnapshot {
+                    p50_ms: percentile_from_merged(&buckets, requests, 0.50),
+                    p95_ms: percentile_from_merged(&buckets, requests, 0.95),
+                    p99_ms: percentile_from_merged(&buckets, requests, 0.99),
+                    max_ms,
+                    min_ms,
+                    mean_ms,
+                },
+            }
+        })
+        .collect();
+    tasks.sort_by(|a, b| a.name.cmp(&b.name));
+    tasks
+}
+
 fn aggregate(snapshots: &[AgentMetricsMsg]) -> AggregatedSnapshot {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -121,6 +198,7 @@ fn aggregate(snapshots: &[AgentMetricsMsg]) -> AggregatedSnapshot {
             active_workers: 0,
             phase: "ramp_up".to_string(),
             latency: LatencySnapshot::default(),
+            tasks: vec![],
         };
     }
 
@@ -209,6 +287,7 @@ fn aggregate(snapshots: &[AgentMetricsMsg]) -> AggregatedSnapshot {
             min_ms,
             mean_ms,
         },
+        tasks: aggregate_tasks(snapshots),
     }
 }
 
@@ -274,6 +353,7 @@ async fn run_with_embedded_broker(
     n_agents: usize,
     broker_addr: &str,
     shared_snapshot: SharedSnapshot,
+    sink: MetricSink,
     spawn: bool,
 ) -> Result<()> {
     eprintln!("[distributed] starting embedded broker on {broker_addr}");
@@ -352,7 +432,7 @@ async fn run_with_embedded_broker(
         );
     }
 
-    aggregate_loop(&mut metrics_rx, n_agents, &shared_snapshot).await?;
+    aggregate_loop(&mut metrics_rx, n_agents, &shared_snapshot, sink).await?;
 
     let stop = serde_json::to_vec(&ControlMsg {
         command: "stop".to_string(),
@@ -381,6 +461,7 @@ async fn aggregate_loop(
     metrics_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     n_agents: usize,
     shared_snapshot: &SharedSnapshot,
+    sink: MetricSink,
 ) -> Result<()> {
     let mut last_snapshots: std::collections::HashMap<String, AgentMetricsMsg> =
         std::collections::HashMap::new();
@@ -422,10 +503,11 @@ async fn aggregate_loop(
                     phase: s.phase.clone(),
                     latency: s.latency.clone(),
                     histogram_buckets: s.histogram_buckets.clone(),
+                    task_snapshots: s.task_snapshots.clone(),
                 }).collect();
 
                 let agg = aggregate(&snaps);
-                println!("{}", serde_json::to_string(&agg)?);
+                sink(serde_json::to_string(&agg)?);
                 update_prometheus(shared_snapshot, &agg);
 
                 if done_count + timed_out.len() >= effective_agents.max(1) {
@@ -451,7 +533,7 @@ async fn aggregate_loop(
     // Final snapshot.
     let snaps: Vec<AgentMetricsMsg> = last_snapshots.into_values().collect();
     let agg = aggregate(&snaps);
-    println!("{}", serde_json::to_string(&agg)?);
+    sink(serde_json::to_string(&agg)?);
     update_prometheus(shared_snapshot, &agg);
 
     Ok(())
@@ -465,8 +547,9 @@ pub async fn run(
     n_agents: usize,
     broker_addr: &str,
     shared_snapshot: SharedSnapshot,
+    sink: MetricSink,
 ) -> Result<()> {
-    run_with_embedded_broker(plan, n_agents, broker_addr, shared_snapshot, true).await
+    run_with_embedded_broker(plan, n_agents, broker_addr, shared_snapshot, sink, true).await
 }
 
 /// Embedded broker + wait for N externally started agents (no spawning).
@@ -476,8 +559,9 @@ pub async fn run_external_agents(
     n_agents: usize,
     broker_addr: &str,
     shared_snapshot: SharedSnapshot,
+    sink: MetricSink,
 ) -> Result<()> {
-    run_with_embedded_broker(plan, n_agents, broker_addr, shared_snapshot, false).await
+    run_with_embedded_broker(plan, n_agents, broker_addr, shared_snapshot, sink, false).await
 }
 
 /// Connect to an external NATS server and wait for N remote agents.
@@ -488,6 +572,7 @@ pub async fn run_with_nats_url(
     nats_url: &str,
     token: Option<&str>,
     shared_snapshot: SharedSnapshot,
+    sink: MetricSink,
 ) -> Result<()> {
     use crate::nats_client::NatsClient;
 
@@ -572,7 +657,7 @@ pub async fn run_with_nats_url(
         }
     });
 
-    aggregate_loop(&mut metrics_rx, n_agents, &shared_snapshot).await?;
+    aggregate_loop(&mut metrics_rx, n_agents, &shared_snapshot, sink).await?;
 
     // Note: we don't publish "stop" here because we can't — nats was moved into the task.
     // Remote agents will stop on their own when the plan duration expires.
@@ -598,6 +683,7 @@ fn update_prometheus(shared: &SharedSnapshot, agg: &AggregatedSnapshot) {
         active_workers: agg.active_workers,
         latency: agg.latency.clone(),
         phase,
+        tasks: agg.tasks.clone(),
     };
     if let Ok(mut guard) = shared.write() {
         *guard = Some(snapshot);
@@ -622,6 +708,7 @@ mod tests {
             phase: "steady".to_string(),
             latency: LatencySnapshot::default(),
             histogram_buckets: buckets,
+            task_snapshots: vec![],
         }
     }
 
@@ -735,5 +822,146 @@ mod tests {
         a1.latency.max_ms = 500.0;
         let agg = aggregate(&[a0, a1]);
         assert_eq!(agg.latency.max_ms, 500.0);
+    }
+
+    // ── aggregate_tasks ───────────────────────────────────────────────────────
+
+    fn make_task_wire(name: &str, requests: u64, errors: u64, buckets: Vec<[u64; 2]>, mean_ms: f64) -> TaskWireSnapshot {
+        TaskWireSnapshot {
+            name: name.to_string(),
+            requests,
+            errors,
+            latency: LatencySnapshot {
+                p50_ms: 0.0,
+                p95_ms: 0.0,
+                p99_ms: 0.0,
+                max_ms: 0.0,
+                min_ms: 0.0,
+                mean_ms,
+            },
+            histogram_buckets: buckets,
+        }
+    }
+
+    fn make_agent_with_tasks(agent_id: &str, tasks: Vec<TaskWireSnapshot>) -> AgentMetricsMsg {
+        let requests_total: u64 = tasks.iter().map(|t| t.requests).sum();
+        AgentMetricsMsg {
+            agent_id: agent_id.to_string(),
+            elapsed_secs: 1.0,
+            current_rps: requests_total as f64,
+            target_rps: requests_total as f64,
+            requests_total,
+            errors_total: tasks.iter().map(|t| t.errors).sum(),
+            active_workers: 1,
+            phase: "steady".to_string(),
+            latency: LatencySnapshot::default(),
+            histogram_buckets: vec![],
+            task_snapshots: tasks,
+        }
+    }
+
+    #[test]
+    fn aggregate_tasks_empty_snapshots() {
+        let tasks = aggregate_tasks(&[]);
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn aggregate_tasks_single_agent_single_task() {
+        let agent = make_agent_with_tasks("a0", vec![
+            make_task_wire("login", 10, 2, vec![[50, 10]], 50.0),
+        ]);
+        let tasks = aggregate_tasks(&[agent]);
+        assert_eq!(tasks.len(), 1);
+        let t = &tasks[0];
+        assert_eq!(t.name, "login");
+        assert_eq!(t.requests, 10);
+        assert_eq!(t.errors, 2);
+        assert_eq!(t.latency.mean_ms, 50.0);
+    }
+
+    #[test]
+    fn aggregate_tasks_merges_same_task_across_agents() {
+        // Two agents each do 10 reqs for "search"
+        let a0 = make_agent_with_tasks("a0", vec![
+            make_task_wire("search", 10, 0, vec![[20, 10]], 20.0),
+        ]);
+        let a1 = make_agent_with_tasks("a1", vec![
+            make_task_wire("search", 10, 1, vec![[40, 10]], 40.0),
+        ]);
+        let tasks = aggregate_tasks(&[a0, a1]);
+        assert_eq!(tasks.len(), 1);
+        let t = &tasks[0];
+        assert_eq!(t.name, "search");
+        assert_eq!(t.requests, 20);
+        assert_eq!(t.errors, 1);
+        // Weighted mean: (20*10 + 40*10) / 20 = 30ms
+        assert_eq!(t.latency.mean_ms, 30.0);
+    }
+
+    #[test]
+    fn aggregate_tasks_merges_histograms_for_exact_percentiles() {
+        // Agent 0: "api" — 100 reqs all at 10ms
+        // Agent 1: "api" — 100 reqs all at 200ms
+        // Simple average p99 = (10+200)/2 = 105ms ← WRONG
+        // Merged     p99 = 200ms                   ← CORRECT
+        let a0 = make_agent_with_tasks("a0", vec![
+            make_task_wire("api", 100, 0, vec![[10, 100]], 10.0),
+        ]);
+        let a1 = make_agent_with_tasks("a1", vec![
+            make_task_wire("api", 100, 0, vec![[200, 100]], 200.0),
+        ]);
+        let tasks = aggregate_tasks(&[a0, a1]);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].latency.p99_ms, 200.0);
+        assert_eq!(tasks[0].latency.p50_ms, 10.0);
+    }
+
+    #[test]
+    fn aggregate_tasks_multiple_tasks_sorted_by_name() {
+        let agent = make_agent_with_tasks("a0", vec![
+            make_task_wire("search", 5, 0, vec![[30, 5]], 30.0),
+            make_task_wire("login",  5, 0, vec![[10, 5]], 10.0),
+            make_task_wire("checkout", 5, 0, vec![[50, 5]], 50.0),
+        ]);
+        let tasks = aggregate_tasks(&[agent]);
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].name, "checkout");
+        assert_eq!(tasks[1].name, "login");
+        assert_eq!(tasks[2].name, "search");
+    }
+
+    #[test]
+    fn aggregate_tasks_max_min_derived_from_merged_histogram() {
+        let a0 = make_agent_with_tasks("a0", vec![
+            make_task_wire("t", 1, 0, vec![[500, 1]], 500.0),
+        ]);
+        let a1 = make_agent_with_tasks("a1", vec![
+            make_task_wire("t", 1, 0, vec![[10, 1]], 10.0),
+        ]);
+        let tasks = aggregate_tasks(&[a0, a1]);
+        assert_eq!(tasks[0].latency.max_ms, 500.0);
+        assert_eq!(tasks[0].latency.min_ms, 10.0);
+    }
+
+    #[test]
+    fn aggregate_tasks_empty_task_snapshots_produces_no_tasks() {
+        // Agents send metrics but no task_snapshots (old agent version).
+        let a0 = make_agent("agent-0", vec![[10, 100]], 100);
+        let a1 = make_agent("agent-1", vec![[20, 100]], 100);
+        let tasks = aggregate_tasks(&[a0, a1]);
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn aggregate_includes_tasks_via_aggregate_fn() {
+        // aggregate() must populate the tasks field.
+        let agent = make_agent_with_tasks("a0", vec![
+            make_task_wire("ping", 10, 0, vec![[5, 10]], 5.0),
+        ]);
+        let agg = aggregate(&[agent]);
+        assert_eq!(agg.tasks.len(), 1);
+        assert_eq!(agg.tasks[0].name, "ping");
+        assert_eq!(agg.tasks[0].requests, 10);
     }
 }

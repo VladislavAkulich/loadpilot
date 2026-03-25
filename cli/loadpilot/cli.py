@@ -482,6 +482,13 @@ def run_command(
         "--save-baseline",
         help="Save results as the baseline for future comparisons (.loadpilot/baseline.json).",
     ),
+    coordinator_url: Optional[str] = typer.Option(
+        None,
+        "--coordinator-url",
+        help="URL of coordinator service in k8s (e.g. http://localhost:8080). "
+             "When set, the coordinator runs in the cluster instead of locally.",
+        envvar="LOADPILOT_COORDINATOR_URL",
+    ),
 ):
     """Run a load test scenario against TARGET. Omit the file to browse interactively."""
     # ── Resolve target: CLI > LOADPILOT_TARGET env > .env > prompt/default ────
@@ -587,12 +594,6 @@ def run_command(
                 client.close()
         raise typer.Exit(0)
 
-    try:
-        coordinator = _find_coordinator_binary()
-    except FileNotFoundError as exc:
-        console.print(f"[red]{exc}[/]")
-        raise typer.Exit(1)
-
     bridge_mode = "[cyan]PyO3[/]" if plan.scenario_file else "[dim]static[/]"
     console.print(
         f"[bold green]Starting LoadPilot[/] — scenario: [cyan]{plan.name}[/] "
@@ -601,53 +602,91 @@ def run_command(
         f"| mode: {bridge_mode}"
     )
 
-    coordinator_cmd = [str(coordinator)]
-    if nats_url:
-        coordinator_cmd += ["--nats-url", nats_url, "--external-agents", str(external_agents or 1)]
-        if nats_token:
-            coordinator_cmd += ["--nats-token", nats_token]
-    elif external_agents > 0:
-        coordinator_cmd += ["--external-agents", str(external_agents)]
-    elif agents > 1:
-        coordinator_cmd += ["--local-agents", str(agents)]
-
-    proc = subprocess.Popen(
-        coordinator_cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-
-    assert proc.stdin is not None
-    proc.stdin.write(plan_json + "\n")
-    proc.stdin.flush()
-    proc.stdin.close()
-
-    assert proc.stdout is not None
-
     scenario_name = plan.name
     last_metrics: AgentMetrics | None = None
     all_snapshots: list[AgentMetrics] = []
 
-    with Live(console=console, refresh_per_second=4) as live:
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                metrics = AgentMetrics(**data)
-                last_metrics = metrics
-                all_snapshots.append(metrics)
-                live.update(_render_dashboard(metrics, scenario_name))
-                if metrics.phase == "done":
-                    break
-            except (json.JSONDecodeError, Exception):
-                console.print(f"[dim]{line}[/]")
+    if coordinator_url:
+        import httpx
 
-    proc.wait()
+        with httpx.stream(
+            "POST",
+            f"{coordinator_url.rstrip('/')}/run",
+            content=plan_json,
+            timeout=None,
+        ) as r:
+            if r.status_code == 409:
+                console.print("[red]Coordinator is busy — another test is running.[/]")
+                raise typer.Exit(1)
+            if r.status_code != 200:
+                console.print(f"[red]Coordinator error: {r.status_code}[/]")
+                raise typer.Exit(1)
+
+            with Live(console=console, refresh_per_second=4) as live:
+                for line in r.iter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        metrics = AgentMetrics(**data)
+                        last_metrics = metrics
+                        all_snapshots.append(metrics)
+                        live.update(_render_dashboard(metrics, scenario_name))
+                        if metrics.phase == "done":
+                            break
+                    except (json.JSONDecodeError, Exception):
+                        console.print(f"[dim]{line}[/]")
+    else:
+        try:
+            coordinator = _find_coordinator_binary()
+        except FileNotFoundError as exc:
+            console.print(f"[red]{exc}[/]")
+            raise typer.Exit(1)
+
+        coordinator_cmd = [str(coordinator)]
+        if nats_url:
+            coordinator_cmd += ["--nats-url", nats_url, "--external-agents", str(external_agents or 1)]
+            if nats_token:
+                coordinator_cmd += ["--nats-token", nats_token]
+        elif external_agents > 0:
+            coordinator_cmd += ["--external-agents", str(external_agents)]
+        elif agents > 1:
+            coordinator_cmd += ["--local-agents", str(agents)]
+
+        proc = subprocess.Popen(
+            coordinator_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+        assert proc.stdin is not None
+        proc.stdin.write(plan_json + "\n")
+        proc.stdin.flush()
+        proc.stdin.close()
+
+        assert proc.stdout is not None
+
+        with Live(console=console, refresh_per_second=4) as live:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    metrics = AgentMetrics(**data)
+                    last_metrics = metrics
+                    all_snapshots.append(metrics)
+                    live.update(_render_dashboard(metrics, scenario_name))
+                    if metrics.phase == "done":
+                        break
+                except (json.JSONDecodeError, Exception):
+                    console.print(f"[dim]{line}[/]")
+
+        proc.wait()
 
     # Run on_stop for each pre-auth VUser to clean up state created in on_start.
     if _preauth_instances:
@@ -747,7 +786,7 @@ def run_command(
     if last_metrics and plan.thresholds:
         threshold_failed = _check_thresholds(last_metrics, plan.thresholds)
 
-    if proc.returncode != 0:
+    if "proc" in locals() and proc.returncode != 0:
         stderr_output = proc.stderr.read() if proc.stderr else ""
         if stderr_output:
             console.print(f"[red]Coordinator stderr:[/]\n{stderr_output}")

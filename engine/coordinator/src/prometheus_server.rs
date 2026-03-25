@@ -20,7 +20,7 @@ async fn metrics_handler(State(snapshot): State<SharedSnapshot>) -> String {
         crate::coordinator::Phase::Done => "done",
     };
 
-    format!(
+    let mut out = format!(
         "# HELP loadpilot_requests_total Total number of HTTP requests made.\n\
          # TYPE loadpilot_requests_total counter\n\
          loadpilot_requests_total {requests_total}\n\
@@ -69,7 +69,63 @@ async fn metrics_handler(State(snapshot): State<SharedSnapshot>) -> String {
         mean = snap.latency.mean_ms,
         elapsed = snap.elapsed_secs,
         phase = phase,
-    )
+    );
+
+    // Per-task metrics (only emitted when the plan has multiple named tasks).
+    if !snap.tasks.is_empty() {
+        out.push_str(
+            "# HELP loadpilot_task_requests_total Total requests per task.\n\
+             # TYPE loadpilot_task_requests_total counter\n",
+        );
+        for t in &snap.tasks {
+            out.push_str(&format!(
+                "loadpilot_task_requests_total{{task=\"{}\"}} {}\n",
+                t.name, t.requests
+            ));
+        }
+        out.push_str(
+            "# HELP loadpilot_task_errors_total Total errors per task.\n\
+             # TYPE loadpilot_task_errors_total counter\n",
+        );
+        for t in &snap.tasks {
+            out.push_str(&format!(
+                "loadpilot_task_errors_total{{task=\"{}\"}} {}\n",
+                t.name, t.errors
+            ));
+        }
+        out.push_str(
+            "# HELP loadpilot_task_latency_p50_ms p50 latency per task in milliseconds.\n\
+             # TYPE loadpilot_task_latency_p50_ms gauge\n",
+        );
+        for t in &snap.tasks {
+            out.push_str(&format!(
+                "loadpilot_task_latency_p50_ms{{task=\"{}\"}} {}\n",
+                t.name, t.latency.p50_ms
+            ));
+        }
+        out.push_str(
+            "# HELP loadpilot_task_latency_p99_ms p99 latency per task in milliseconds.\n\
+             # TYPE loadpilot_task_latency_p99_ms gauge\n",
+        );
+        for t in &snap.tasks {
+            out.push_str(&format!(
+                "loadpilot_task_latency_p99_ms{{task=\"{}\"}} {}\n",
+                t.name, t.latency.p99_ms
+            ));
+        }
+        out.push_str(
+            "# HELP loadpilot_task_latency_mean_ms Mean latency per task in milliseconds.\n\
+             # TYPE loadpilot_task_latency_mean_ms gauge\n",
+        );
+        for t in &snap.tasks {
+            out.push_str(&format!(
+                "loadpilot_task_latency_mean_ms{{task=\"{}\"}} {}\n",
+                t.name, t.latency.mean_ms
+            ));
+        }
+    }
+
+    out
 }
 
 pub async fn serve(port: u16, snapshot: SharedSnapshot) -> Result<()> {

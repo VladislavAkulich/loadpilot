@@ -166,6 +166,17 @@ pub struct LatencySnapshot {
     pub mean_ms: f64,
 }
 
+/// Per-task breakdown included in each AgentMetrics report.
+/// Sparse histogram allows exact percentile merging on the coordinator side.
+#[derive(Debug, Serialize)]
+pub struct TaskWireSnapshot {
+    pub name: String,
+    pub requests: u64,
+    pub errors: u64,
+    pub latency: LatencySnapshot,
+    pub histogram_buckets: Vec<[u64; 2]>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AgentMetrics {
     pub agent_id: String,
@@ -180,6 +191,9 @@ pub struct AgentMetrics {
     /// Sparse histogram for exact percentile merging on coordinator side.
     /// Each entry is [bucket_index_ms, count]. Only non-zero buckets included.
     pub histogram_buckets: Vec<[u64; 2]>,
+    /// Per-task breakdown.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub task_snapshots: Vec<TaskWireSnapshot>,
 }
 
 // ── Internal counters ─────────────────────────────────────────────────────────
@@ -266,6 +280,58 @@ impl Counters {
         MAX_MS as f64
     }
 
+    fn task_wire_snapshot(&self, name: &str) -> TaskWireSnapshot {
+        let total = self.requests_total.load(Ordering::Relaxed);
+        let mean_ms = if total > 0 {
+            self.latency_sum.load(Ordering::Relaxed) as f64 / total as f64
+        } else {
+            0.0
+        };
+        let max_ms = {
+            let v = self.latency_max.load(Ordering::Relaxed);
+            if v == 0 {
+                0.0
+            } else {
+                v as f64
+            }
+        };
+        let min_ms = {
+            let v = self.latency_min.load(Ordering::Relaxed);
+            if v == u64::MAX {
+                0.0
+            } else {
+                v as f64
+            }
+        };
+        let histogram_buckets: Vec<[u64; 2]> = self
+            .latency_buckets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| {
+                let c = b.load(Ordering::Relaxed);
+                if c > 0 {
+                    Some([i as u64, c])
+                } else {
+                    None
+                }
+            })
+            .collect();
+        TaskWireSnapshot {
+            name: name.to_string(),
+            requests: total,
+            errors: self.errors_total.load(Ordering::Relaxed),
+            latency: LatencySnapshot {
+                p50_ms: self.percentile(0.50),
+                p95_ms: self.percentile(0.95),
+                p99_ms: self.percentile(0.99),
+                max_ms,
+                min_ms,
+                mean_ms,
+            },
+            histogram_buckets,
+        }
+    }
+
     fn snapshot(
         &self,
         elapsed: f64,
@@ -328,6 +394,7 @@ impl Counters {
                 mean_ms,
             },
             histogram_buckets,
+            task_snapshots: vec![], // filled by run_inner
         }
     }
 }
@@ -368,6 +435,15 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
 
     let tasks = Arc::new(plan.tasks.clone());
     let base_url = Arc::new(plan.target_url.clone());
+
+    // Pre-allocate per-task counters (immutable map after init → lock-free in hot path).
+    let per_task: Arc<HashMap<String, Arc<Counters>>> = {
+        let mut map = HashMap::new();
+        for t in plan.tasks.iter() {
+            map.insert(t.name.clone(), Counters::new());
+        }
+        Arc::new(map)
+    };
     let duration = total_duration(&plan);
     let plan_arc = Arc::new(plan);
     // Pre-auth pool: Arc so workers can cheaply clone the reference.
@@ -385,7 +461,13 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
         let elapsed = start.elapsed();
 
         if elapsed >= duration {
-            let snap = counters.snapshot(elapsed.as_secs_f64(), 0.0, plan_arc.rps as f64, "done");
+            let mut snap =
+                counters.snapshot(elapsed.as_secs_f64(), 0.0, plan_arc.rps as f64, "done");
+            snap.task_snapshots = per_task
+                .iter()
+                .map(|(name, tc)| tc.task_wire_snapshot(name))
+                .collect();
+            snap.task_snapshots.sort_by(|a, b| a.name.cmp(&b.name));
             let _ = tx.send(snap).await;
             break;
         }
@@ -425,6 +507,7 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
             let url = format!("{}{}", base_url, task_path);
             let http2 = http.clone();
             let counters2 = Arc::clone(&counters);
+            let task_counters = per_task.get(&task.name).map(Arc::clone);
             let permit = Arc::clone(&sem).acquire_owned().await.ok();
 
             tokio::spawn(async move {
@@ -452,13 +535,18 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
                 match req.send().await {
                     Ok(resp) => {
                         let ms = t0.elapsed().as_millis() as u64;
-                        counters2.record(
-                            ms,
-                            resp.status().is_client_error() || resp.status().is_server_error(),
-                        );
+                        let is_error =
+                            resp.status().is_client_error() || resp.status().is_server_error();
+                        counters2.record(ms, is_error);
+                        if let Some(tc) = task_counters {
+                            tc.record(ms, is_error);
+                        }
                     }
                     Err(_) => {
                         counters2.record(ms, true);
+                        if let Some(tc) = task_counters {
+                            tc.record(ms, true);
+                        }
                     }
                 }
             });
@@ -472,7 +560,12 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
             window_reqs = 0;
             window_start = Instant::now();
 
-            let snap = counters.snapshot(elapsed_secs, current_rps, t_rps, phase);
+            let mut snap = counters.snapshot(elapsed_secs, current_rps, t_rps, phase);
+            snap.task_snapshots = per_task
+                .iter()
+                .map(|(name, tc)| tc.task_wire_snapshot(name))
+                .collect();
+            snap.task_snapshots.sort_by(|a, b| a.name.cmp(&b.name));
             let _ = tx.send(snap).await;
         }
 
@@ -745,5 +838,99 @@ mod tests {
             let plan = make_plan(10, 60, 30, mode);
             assert_eq!(total_duration(&plan), Duration::from_secs(60));
         }
+    }
+
+    // ── Counters::task_wire_snapshot ──────────────────────────────────────────
+
+    #[test]
+    fn task_wire_snapshot_empty_counters() {
+        let c = Counters::new();
+        let snap = c.task_wire_snapshot("login");
+        assert_eq!(snap.name, "login");
+        assert_eq!(snap.requests, 0);
+        assert_eq!(snap.errors, 0);
+        assert_eq!(snap.latency.mean_ms, 0.0);
+        assert_eq!(snap.latency.max_ms, 0.0);
+        assert_eq!(snap.latency.min_ms, 0.0);
+        assert!(snap.histogram_buckets.is_empty());
+    }
+
+    #[test]
+    fn task_wire_snapshot_counts_requests_and_errors() {
+        let c = Counters::new();
+        c.record(100, false);
+        c.record(200, true);
+        c.record(150, false);
+        let snap = c.task_wire_snapshot("checkout");
+        assert_eq!(snap.requests, 3);
+        assert_eq!(snap.errors, 1);
+    }
+
+    #[test]
+    fn task_wire_snapshot_mean_ms_is_correct() {
+        let c = Counters::new();
+        c.record(100, false);
+        c.record(200, false);
+        c.record(300, false);
+        let snap = c.task_wire_snapshot("t");
+        assert_eq!(snap.latency.mean_ms, 200.0);
+    }
+
+    #[test]
+    fn task_wire_snapshot_histogram_buckets_are_sparse() {
+        let c = Counters::new();
+        c.record(10, false);
+        c.record(10, false);
+        c.record(50, false);
+        let snap = c.task_wire_snapshot("t");
+        // Only non-zero buckets: [10, 2] and [50, 1]
+        assert_eq!(snap.histogram_buckets.len(), 2);
+        let b10 = snap.histogram_buckets.iter().find(|b| b[0] == 10).unwrap();
+        let b50 = snap.histogram_buckets.iter().find(|b| b[0] == 50).unwrap();
+        assert_eq!(b10[1], 2);
+        assert_eq!(b50[1], 1);
+    }
+
+    #[test]
+    fn task_wire_snapshot_percentiles_match_histogram() {
+        let c = Counters::new();
+        // 100 requests all at 42ms
+        for _ in 0..100 {
+            c.record(42, false);
+        }
+        let snap = c.task_wire_snapshot("t");
+        assert_eq!(snap.latency.p50_ms, 42.0);
+        assert_eq!(snap.latency.p99_ms, 42.0);
+    }
+
+    #[test]
+    fn task_wire_snapshot_max_min_tracked() {
+        let c = Counters::new();
+        c.record(500, false);
+        c.record(10, false);
+        c.record(250, false);
+        let snap = c.task_wire_snapshot("t");
+        assert_eq!(snap.latency.max_ms, 500.0);
+        assert_eq!(snap.latency.min_ms, 10.0);
+    }
+
+    #[test]
+    fn task_wire_snapshot_tasks_are_independent() {
+        // Two separate Counters should not share state.
+        let c_login = Counters::new();
+        let c_search = Counters::new();
+        c_login.record(100, false);
+        c_login.record(200, false);
+        c_search.record(50, true);
+
+        let s_login = c_login.task_wire_snapshot("login");
+        let s_search = c_search.task_wire_snapshot("search");
+
+        assert_eq!(s_login.requests, 2);
+        assert_eq!(s_login.errors, 0);
+        assert_eq!(s_search.requests, 1);
+        assert_eq!(s_search.errors, 1);
+        assert_eq!(s_login.latency.mean_ms, 150.0);
+        assert_eq!(s_search.latency.mean_ms, 50.0);
     }
 }

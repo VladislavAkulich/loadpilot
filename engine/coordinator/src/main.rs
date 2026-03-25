@@ -6,6 +6,7 @@ mod nats_client;
 mod plan;
 mod prometheus_server;
 mod python_bridge;
+mod serve;
 
 use std::sync::{Arc, RwLock};
 
@@ -13,6 +14,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use crate::coordinator::SharedSnapshot;
+use crate::metrics::stdout_sink;
 
 #[derive(Parser)]
 #[command(name = "coordinator", about = "LoadPilot coordinator process")]
@@ -43,11 +45,43 @@ struct Args {
     /// Embedded broker address (used in local and external-agents modes).
     #[arg(long, default_value = "127.0.0.1:4222")]
     broker_addr: String,
+
+    /// Run as a persistent HTTP service (serve mode for k8s deployments).
+    /// Listens on 0.0.0.0:8080 for POST /run requests.
+    #[arg(long)]
+    serve: bool,
+
+    /// Number of agents to expect in serve mode (used with --serve).
+    #[arg(long, default_value = "1")]
+    serve_agents: usize,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    // Prometheus runs in all modes.
+    let shared_snapshot: SharedSnapshot = Arc::new(RwLock::new(None));
+
+    if args.serve {
+        let nats_url = args
+            .nats_url
+            .unwrap_or_else(|| "nats://localhost:4222".to_string());
+        return serve::run(
+            nats_url,
+            args.serve_agents,
+            args.nats_token,
+            shared_snapshot,
+        )
+        .await;
+    }
+
+    let prom_snapshot = Arc::clone(&shared_snapshot);
+    tokio::spawn(async move {
+        if let Err(e) = prometheus_server::serve(9090, prom_snapshot).await {
+            eprintln!("Prometheus server error: {}", e);
+        }
+    });
 
     let mut input = String::new();
     use std::io::Read;
@@ -56,15 +90,6 @@ async fn main() -> Result<()> {
     let preview: String = input.chars().take(200).collect();
     let plan: plan::ScenarioPlan = serde_json::from_str(input.trim())
         .map_err(|e| anyhow::anyhow!("Failed to parse plan JSON: {}\nInput: {}", e, preview))?;
-
-    // Prometheus runs in all modes.
-    let shared_snapshot: SharedSnapshot = Arc::new(RwLock::new(None));
-    let prom_snapshot = Arc::clone(&shared_snapshot);
-    tokio::spawn(async move {
-        if let Err(e) = prometheus_server::serve(9090, prom_snapshot).await {
-            eprintln!("Prometheus server error: {}", e);
-        }
-    });
 
     if let Some(nats_url) = args.nats_url {
         if args.external_agents == 0 {
@@ -78,21 +103,30 @@ async fn main() -> Result<()> {
             &nats_url,
             args.nats_token.as_deref(),
             shared_snapshot,
+            stdout_sink(),
         )
         .await?;
     } else if args.local_agents > 0 {
-        distributed::run(plan, args.local_agents, &args.broker_addr, shared_snapshot).await?;
+        distributed::run(
+            plan,
+            args.local_agents,
+            &args.broker_addr,
+            shared_snapshot,
+            stdout_sink(),
+        )
+        .await?;
     } else if args.external_agents > 0 {
         distributed::run_external_agents(
             plan,
             args.external_agents,
             &args.broker_addr,
             shared_snapshot,
+            stdout_sink(),
         )
         .await?;
     } else {
         let coord = coordinator::Coordinator::new(plan);
-        coord.run(shared_snapshot).await?;
+        coord.run(shared_snapshot, stdout_sink()).await?;
     }
 
     Ok(())

@@ -30,4 +30,5 @@ RUN chmod +x /usr/local/bin/loadpilot-agent
 ENV COORDINATOR=localhost:4222
 ENV AGENT_ID=agent-0
 
-CMD ["sh", "-c", "exec loadpilot-agent --coordinator \"$COORDINATOR\" --agent-id \"$AGENT_ID\""]
+ENTRYPOINT ["/usr/local/bin/loadpilot-agent"]
+CMD ["--coordinator", "localhost:4222", "--agent-id", "agent-0"]
