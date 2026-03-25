@@ -46,7 +46,7 @@ pub async fn run(
     let prom = Arc::clone(&shared_snapshot);
     tokio::spawn(async move {
         if let Err(e) = prometheus_server::serve(9090, prom).await {
-            eprintln!("[serve] Prometheus error: {e}");
+            tracing::error!("Prometheus server error: {e}");
         }
     });
 
@@ -64,7 +64,7 @@ pub async fn run(
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
-    eprintln!("[serve] listening on 0.0.0.0:8080");
+    tracing::info!("listening on 0.0.0.0:8080");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -113,7 +113,7 @@ async fn run_handler(State(state): State<Arc<ServeState>>, body: String) -> Resp
         )
         .await;
         if let Err(e) = result {
-            eprintln!("[serve] test error: {e}");
+            tracing::error!("test run error: {e}");
         }
         state2.busy.store(false, Ordering::Release);
         drop(metric_tx2);

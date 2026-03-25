@@ -11,6 +11,7 @@ mod runner;
 
 use anyhow::Result;
 use clap::Parser;
+use tracing_subscriber::EnvFilter;
 use serde::{Deserialize, Serialize};
 use tokio::time::{interval, sleep, Duration};
 
@@ -66,22 +67,21 @@ struct ControlMsg {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("agent=info".parse()?))
+        .with_writer(std::io::stderr)
+        .init();
+
     let args = Args::parse();
 
     loop {
         match run_once(&args).await {
             Ok(()) => {
-                eprintln!(
-                    "[agent {}] run complete — reconnecting in 2s...",
-                    args.agent_id
-                );
+                tracing::info!(agent_id = %args.agent_id, "run complete — reconnecting in 2s");
                 sleep(Duration::from_secs(2)).await;
             }
             Err(e) => {
-                eprintln!(
-                    "[agent {}] error: {e} — reconnecting in 5s...",
-                    args.agent_id
-                );
+                tracing::warn!(agent_id = %args.agent_id, "error: {e} — reconnecting in 5s");
                 sleep(Duration::from_secs(5)).await;
             }
         }
@@ -108,10 +108,7 @@ async fn run_once(args: &Args) -> Result<()> {
     })?;
     nats.publish("loadpilot.register", reg.as_bytes()).await?;
 
-    eprintln!(
-        "[agent {}] registered — waiting for plan shard...",
-        args.agent_id
-    );
+    tracing::info!(agent_id = %args.agent_id, "registered — waiting for plan shard");
 
     // Wait for shard plan or stop signal.
     let mut reannounce = interval(Duration::from_secs(3));
@@ -125,19 +122,13 @@ async fn run_once(args: &Args) -> Result<()> {
                 let (subject, payload) = result?;
                 if subject == shard_subject {
                     let msg: ShardMsg = serde_json::from_slice(&payload)?;
-                    eprintln!(
-                        "[agent {}] received shard ({} RPS)",
-                        args.agent_id, msg.plan.rps
-                    );
+                    tracing::info!(agent_id = %args.agent_id, rps = msg.plan.rps, "received shard");
                     break msg;
                 }
                 if subject == "loadpilot.control" {
                     if let Ok(ctrl) = serde_json::from_slice::<ControlMsg>(&payload) {
                         if ctrl.command == "stop" {
-                            eprintln!(
-                                "[agent {}] received stop before shard — will retry",
-                                args.agent_id
-                            );
+                            tracing::info!(agent_id = %args.agent_id, "received stop before shard — will retry");
                             return Ok(());
                         }
                     }
@@ -154,10 +145,7 @@ async fn run_once(args: &Args) -> Result<()> {
             .as_millis() as u64;
         if msg.start_at_unix_ms > now_ms {
             let wait_ms = msg.start_at_unix_ms - now_ms;
-            eprintln!(
-                "[agent {}] waiting {wait_ms}ms for synchronised start...",
-                args.agent_id
-            );
+            tracing::info!(agent_id = %args.agent_id, wait_ms, "waiting for synchronised start");
             sleep(Duration::from_millis(wait_ms)).await;
         }
     }
@@ -186,6 +174,6 @@ async fn run_once(args: &Args) -> Result<()> {
         }
     }
 
-    eprintln!("[agent {}] done", args.agent_id);
+    tracing::info!(agent_id = %args.agent_id, "done");
     Ok(())
 }

@@ -22,7 +22,7 @@ use tokio::time::sleep;
 use std::sync::RwLock;
 
 use crate::metrics::{LatencySnapshot, MetricSink, Metrics, TaskSnapshot};
-use crate::plan::{Mode, ScenarioPlan, TaskPlan};
+use crate::plan::{HttpMethod, Mode, ScenarioPlan, TaskPlan};
 use crate::python_bridge::PythonBridge;
 
 pub type SharedSnapshot = Arc<RwLock<Option<MetricsSnapshot>>>;
@@ -68,6 +68,7 @@ impl Coordinator {
     }
 
     pub async fn run(self, shared_snapshot: SharedSnapshot, sink: MetricSink) -> Result<()> {
+        anyhow::ensure!(!self.plan.tasks.is_empty(), "plan contains no tasks");
         let plan = Arc::new(self.plan);
         let metrics = self.metrics;
 
@@ -109,14 +110,11 @@ impl Coordinator {
                     tokio::runtime::Handle::current(),
                 ) {
                     Ok(b) => {
-                        eprintln!("[loadpilot] PyO3 bridge ready ({} VUsers)", n);
+                        tracing::info!(vusers = n, "PyO3 bridge ready");
                         Some(Arc::new(b))
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[loadpilot] PyO3 bridge init failed: {} — using static URLs",
-                            e
-                        );
+                        tracing::warn!("PyO3 bridge init failed: {e} — using static URLs");
                         None
                     }
                 }
@@ -146,7 +144,7 @@ impl Coordinator {
                     let b_clone = Arc::clone(&b);
                     match b_clone.call_on_start(i).await {
                         Ok(()) => {}
-                        Err(e) => eprintln!("[loadpilot] on_start[{}] error: {}", i, e),
+                        Err(e) => tracing::warn!(vuser = i, "on_start error: {e}"),
                     }
 
                     ready.fetch_add(1, Ordering::Release);
@@ -249,7 +247,10 @@ impl Coordinator {
             }
 
             for i in 0..n_requests {
-                let t = pick_task(&plan.tasks, i);
+                let t = match pick_task(&plan.tasks, i) {
+                    Some(t) => t,
+                    None => continue,
+                };
                 let task_name = t.name.clone();
 
                 let metrics_task = metrics.clone();
@@ -279,10 +280,7 @@ impl Coordinator {
                                 } else {
                                     for cr in calls {
                                         if let Some(ref err) = cr.error {
-                                            eprintln!(
-                                                "[loadpilot] task error ({}): {}",
-                                                task_name, err
-                                            );
+                                            tracing::warn!(task = %task_name, "task error: {err}");
                                         }
                                         if cr.success {
                                             metrics_task
@@ -295,7 +293,7 @@ impl Coordinator {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("[loadpilot] run_task error: {}", e);
+                                tracing::warn!(task = %task_name, "run_task error: {e}");
                                 metrics_task.record_error_task(&task_name, 0);
                             }
                         }
@@ -305,8 +303,8 @@ impl Coordinator {
                     // Static path: URL / method come directly from the plan.
                     let client = http_client.clone();
                     let url = format!("{}{}", plan.target_url.trim_end_matches('/'), t.url);
-                    let method = t.method.clone();
-                    let headers = t.headers.clone();
+                    let method = t.method; // Copy
+                    let headers = t.headers.clone(); // Arc clone — O(1)
                     let body = t.body_template.clone();
 
                     tokio::spawn(async move {
@@ -317,7 +315,7 @@ impl Coordinator {
                         active_clone2.fetch_add(1, Ordering::Relaxed);
                         let t0 = Instant::now();
                         let result =
-                            execute_request(&client, &method, &url, &headers, body.as_deref())
+                            execute_request(&client, method, &url, &headers, body.as_deref())
                                 .await;
                         let latency_ms = t0.elapsed().as_millis() as u64;
                         match result {
@@ -341,7 +339,7 @@ impl Coordinator {
             let n = b.n_vusers();
             for i in 0..n {
                 if let Err(e) = b.call_on_stop(i).await {
-                    eprintln!("[loadpilot] on_stop[{}] error: {}", i, e);
+                    tracing::warn!(vuser = i, "on_stop error: {e}");
                 }
             }
             b.shutdown();
@@ -424,23 +422,23 @@ fn compute_phase_and_rps(elapsed_secs: f64, plan: &ScenarioPlan) -> (Phase, f64)
     }
 }
 
-fn pick_task(tasks: &[TaskPlan], index: usize) -> &TaskPlan {
+fn pick_task<'a>(tasks: &'a [TaskPlan], index: usize) -> Option<&'a TaskPlan> {
     if tasks.is_empty() {
-        panic!("No tasks in plan");
+        return None;
     }
     let total_weight: u32 = tasks.iter().map(|t| t.weight).sum();
     if total_weight == 0 {
-        return &tasks[index % tasks.len()];
+        return Some(&tasks[index % tasks.len()]);
     }
     let slot = (index as u32) % total_weight;
     let mut cumulative = 0u32;
     for t in tasks {
         cumulative += t.weight;
         if slot < cumulative {
-            return t;
+            return Some(t);
         }
     }
-    &tasks[tasks.len() - 1]
+    Some(&tasks[tasks.len() - 1])
 }
 
 /// Response data returned from a live HTTP request.
@@ -454,18 +452,17 @@ struct HttpResponse {
 
 async fn execute_request(
     client: &reqwest::Client,
-    method: &str,
+    method: HttpMethod,
     url: &str,
     headers: &std::collections::HashMap<String, String>,
     body: Option<&str>,
 ) -> Result<HttpResponse> {
-    let mut req = match method.to_uppercase().as_str() {
-        "GET" => client.get(url),
-        "POST" => client.post(url),
-        "PUT" => client.put(url),
-        "PATCH" => client.patch(url),
-        "DELETE" => client.delete(url),
-        other => return Err(anyhow::anyhow!("Unknown HTTP method: {}", other)),
+    let mut req = match method {
+        HttpMethod::Get => client.get(url),
+        HttpMethod::Post => client.post(url),
+        HttpMethod::Put => client.put(url),
+        HttpMethod::Patch => client.patch(url),
+        HttpMethod::Delete => client.delete(url),
     };
 
     for (k, v) in headers {
@@ -499,14 +496,15 @@ mod tests {
     use super::*;
     use crate::plan::TaskPlan;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     fn make_task(name: &str, weight: u32) -> TaskPlan {
         TaskPlan {
             name: name.to_string(),
             weight,
             url: "/".to_string(),
-            method: "GET".to_string(),
-            headers: HashMap::new(),
+            method: HttpMethod::Get,
+            headers: Arc::new(HashMap::new()),
             body_template: None,
         }
     }
@@ -614,35 +612,38 @@ mod tests {
     // ── pick_task ─────────────────────────────────────────────────────────────
 
     #[test]
+    fn pick_task_empty_returns_none() {
+        assert!(pick_task(&[], 0).is_none());
+    }
+
+    #[test]
     fn pick_task_single_task_always_selected() {
         let tasks = vec![make_task("only", 1)];
         for i in 0..5 {
-            assert_eq!(pick_task(&tasks, i).name, "only");
+            assert_eq!(pick_task(&tasks, i).unwrap().name, "only");
         }
     }
 
     #[test]
     fn pick_task_equal_weights_round_robin() {
         let tasks = vec![make_task("a", 1), make_task("b", 1)];
-        assert_eq!(pick_task(&tasks, 0).name, "a");
-        assert_eq!(pick_task(&tasks, 1).name, "b");
-        assert_eq!(pick_task(&tasks, 2).name, "a");
+        assert_eq!(pick_task(&tasks, 0).unwrap().name, "a");
+        assert_eq!(pick_task(&tasks, 1).unwrap().name, "b");
+        assert_eq!(pick_task(&tasks, 2).unwrap().name, "a");
     }
 
     #[test]
     fn pick_task_higher_weight_selected_more() {
         // weights: a=1, b=3 → total=4; slots 0→a, 1,2,3→b
         let tasks = vec![make_task("a", 1), make_task("b", 3)];
-        let names: Vec<&str> = (0..4).map(|i| pick_task(&tasks, i).name.as_str()).collect();
+        let names: Vec<&str> = (0..4).map(|i| pick_task(&tasks, i).unwrap().name.as_str()).collect();
         assert_eq!(names, vec!["a", "b", "b", "b"]);
     }
 
     #[test]
     fn pick_task_wraps_around() {
         let tasks = vec![make_task("a", 1), make_task("b", 1)];
-        // index 4 → slot 4 % 2 = 0 → "a"
-        assert_eq!(pick_task(&tasks, 4).name, "a");
-        // index 5 → slot 5 % 2 = 1 → "b"
-        assert_eq!(pick_task(&tasks, 5).name, "b");
+        assert_eq!(pick_task(&tasks, 4).unwrap().name, "a");
+        assert_eq!(pick_task(&tasks, 5).unwrap().name, "b");
     }
 }

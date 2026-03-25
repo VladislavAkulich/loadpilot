@@ -17,10 +17,7 @@ impl Agent {
 
     /// Connect to the coordinator and start receiving work.
     pub async fn run(&self) -> Result<()> {
-        eprintln!(
-            "[{}] Connecting to coordinator at {} (v2 stub)",
-            self.id, self.coordinator_addr
-        );
+        tracing::info!(id = %self.id, coordinator_addr = %self.coordinator_addr, "connecting to coordinator (v2 stub)");
         // v2: open TCP connection, receive ScenarioPlan slice, delegate to worker pool
         Ok(())
     }

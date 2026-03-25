@@ -12,6 +12,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use clap::Parser;
+use tracing_subscriber::EnvFilter;
 
 use crate::coordinator::SharedSnapshot;
 use crate::metrics::stdout_sink;
@@ -58,6 +59,11 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("coordinator=info".parse()?))
+        .with_writer(std::io::stderr)
+        .init();
+
     let args = Args::parse();
 
     // Prometheus runs in all modes.
@@ -79,7 +85,7 @@ async fn main() -> Result<()> {
     let prom_snapshot = Arc::clone(&shared_snapshot);
     tokio::spawn(async move {
         if let Err(e) = prometheus_server::serve(9090, prom_snapshot).await {
-            eprintln!("Prometheus server error: {}", e);
+            tracing::error!("Prometheus server error: {}", e);
         }
     });
 

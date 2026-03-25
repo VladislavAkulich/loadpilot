@@ -21,25 +21,37 @@ use tokio::{
 
 // ── Plan types (mirror coordinator's plan.rs) ─────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+pub enum HttpMethod {
+    #[default]
+    #[serde(rename = "GET")]
+    Get,
+    #[serde(rename = "POST")]
+    Post,
+    #[serde(rename = "PUT")]
+    Put,
+    #[serde(rename = "PATCH")]
+    Patch,
+    #[serde(rename = "DELETE")]
+    Delete,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct TaskPlan {
     pub name: String,
     #[serde(default = "default_weight")]
     pub weight: u32,
     pub url: String,
-    #[serde(default = "default_method")]
-    pub method: String,
     #[serde(default)]
-    pub headers: HashMap<String, String>,
+    pub method: HttpMethod,
+    #[serde(default)]
+    pub headers: Arc<HashMap<String, String>>,
     #[serde(default)]
     pub body_template: Option<String>,
 }
 
 fn default_weight() -> u32 {
     1
-}
-fn default_method() -> String {
-    "GET".to_string()
 }
 
 /// Per-VUser pre-auth headers shipped with the plan for distributed mode.
@@ -484,7 +496,7 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
             if tasks.is_empty() {
                 break;
             }
-            let task = pick_task(&tasks, request_idx).clone();
+            let task = pick_task(&tasks, request_idx);
             // Pick per-VUser headers and URL overrides by round-robin through the pre-auth pool.
             let (extra_headers, task_path): (HashMap<String, String>, String) = if pool_size > 0 {
                 let slot = (request_idx % pool_size) as usize;
@@ -502,33 +514,39 @@ async fn run_inner(plan: Plan, tx: mpsc::Sender<AgentMetrics>) {
             } else {
                 (HashMap::new(), task.url.clone())
             };
+
+            let task_counters = per_task.get(&task.name).map(Arc::clone);
+            // Copy/clone only what the spawn closure needs — method is Copy (enum),
+            // headers is Arc so clone is O(1).
+            let method = task.method;
+            let task_headers = Arc::clone(&task.headers);
+            let task_body = task.body_template.clone();
             request_idx += 1;
 
             let url = format!("{}{}", base_url, task_path);
             let http2 = http.clone();
             let counters2 = Arc::clone(&counters);
-            let task_counters = per_task.get(&task.name).map(Arc::clone);
             let permit = Arc::clone(&sem).acquire_owned().await.ok();
 
             tokio::spawn(async move {
                 let _permit = permit;
                 let t0 = Instant::now();
-                let mut req = match task.method.as_str() {
-                    "POST" => http2.post(&url),
-                    "PUT" => http2.put(&url),
-                    "PATCH" => http2.patch(&url),
-                    "DELETE" => http2.delete(&url),
-                    _ => http2.get(&url),
+                let mut req = match method {
+                    HttpMethod::Post => http2.post(&url),
+                    HttpMethod::Put => http2.put(&url),
+                    HttpMethod::Patch => http2.patch(&url),
+                    HttpMethod::Delete => http2.delete(&url),
+                    HttpMethod::Get => http2.get(&url),
                 };
                 // Task-level static headers first, then per-VUser pre-auth headers
                 // (pre-auth headers take precedence so on_start tokens override defaults).
-                for (k, v) in &task.headers {
+                for (k, v) in task_headers.iter() {
                     req = req.header(k, v);
                 }
                 for (k, v) in &extra_headers {
                     req = req.header(k, v);
                 }
-                if let Some(body) = &task.body_template {
+                if let Some(body) = &task_body {
                     req = req.body(body.clone());
                 }
                 let ms = t0.elapsed().as_millis() as u64;
@@ -713,16 +731,16 @@ mod tests {
                 name: "a".to_string(),
                 weight: 1,
                 url: "/a".to_string(),
-                method: "GET".to_string(),
-                headers: HashMap::new(),
+                method: HttpMethod::Get,
+                headers: Arc::new(HashMap::new()),
                 body_template: None,
             },
             TaskPlan {
                 name: "b".to_string(),
                 weight: 3,
                 url: "/b".to_string(),
-                method: "GET".to_string(),
-                headers: HashMap::new(),
+                method: HttpMethod::Get,
+                headers: Arc::new(HashMap::new()),
                 body_template: None,
             },
         ];
@@ -740,8 +758,8 @@ mod tests {
             name: "only".to_string(),
             weight: 1,
             url: "/".to_string(),
-            method: "GET".to_string(),
-            headers: HashMap::new(),
+            method: HttpMethod::Get,
+            headers: Arc::new(HashMap::new()),
             body_template: None,
         }];
         for idx in 0..10 {
@@ -758,8 +776,8 @@ mod tests {
             name: "read_project".to_string(),
             weight: 1,
             url: "/".to_string(), // default fallback
-            method: "GET".to_string(),
-            headers: HashMap::new(),
+            method: HttpMethod::Get,
+            headers: Arc::new(HashMap::new()),
             body_template: None,
         };
         let mut task_urls = HashMap::new();
@@ -791,8 +809,8 @@ mod tests {
             name: "list_projects".to_string(),
             weight: 1,
             url: "/api/v1/projects".to_string(),
-            method: "GET".to_string(),
-            headers: HashMap::new(),
+            method: HttpMethod::Get,
+            headers: Arc::new(HashMap::new()),
             body_template: None,
         };
         let vc = VUserConfig {

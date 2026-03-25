@@ -486,7 +486,7 @@ def run_command(
         None,
         "--coordinator-url",
         help="URL of coordinator service in k8s (e.g. http://localhost:8080). "
-             "When set, the coordinator runs in the cluster instead of locally.",
+        "When set, the coordinator runs in the cluster instead of locally.",
         envvar="LOADPILOT_COORDINATOR_URL",
     ),
 ):
@@ -646,7 +646,12 @@ def run_command(
 
         coordinator_cmd = [str(coordinator)]
         if nats_url:
-            coordinator_cmd += ["--nats-url", nats_url, "--external-agents", str(external_agents or 1)]
+            coordinator_cmd += [
+                "--nats-url",
+                nats_url,
+                "--external-agents",
+                str(external_agents or 1),
+            ]
             if nats_token:
                 coordinator_cmd += ["--nats-token", nats_token]
         elif external_agents > 0:

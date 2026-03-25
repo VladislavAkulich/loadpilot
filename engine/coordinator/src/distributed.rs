@@ -356,7 +356,7 @@ async fn run_with_embedded_broker(
     sink: MetricSink,
     spawn: bool,
 ) -> Result<()> {
-    eprintln!("[distributed] starting embedded broker on {broker_addr}");
+    tracing::info!("starting embedded broker on {broker_addr}");
     let broker = broker::start(broker_addr)
         .await
         .with_context(|| format!("Failed to start embedded broker on {broker_addr}"))?;
@@ -368,10 +368,7 @@ async fn run_with_embedded_broker(
 
     if spawn {
         let agent_bin = agent_binary()?;
-        eprintln!(
-            "[distributed] spawning {n_agents} agents using {}",
-            agent_bin.display()
-        );
+        tracing::info!(n_agents, agent_bin = %agent_bin.display(), "spawning agents");
         let run_id = uuid::Uuid::new_v4().to_string();
 
         for i in 0..n_agents {
@@ -389,19 +386,19 @@ async fn run_with_embedded_broker(
         }
         let _ = run_id; // kept for potential future use
     } else {
-        eprintln!("[distributed] embedded broker ready — waiting for {n_agents} external agent(s) on {broker_addr}");
+        tracing::info!("embedded broker ready — waiting for {n_agents} external agent(s) on {broker_addr}");
     }
 
     // Registration timeout: 30s for local agents, 5 min for external.
     let reg_timeout_secs = if spawn { 30 } else { 300 };
-    eprintln!("[distributed] waiting for {n_agents} agent(s) to register (timeout: {reg_timeout_secs}s)...");
+    tracing::info!("waiting for {n_agents} agent(s) to register (timeout: {reg_timeout_secs}s)...");
     let mut registered: Vec<String> = Vec::new();
 
     timeout(Duration::from_secs(reg_timeout_secs), async {
         while registered.len() < n_agents {
             if let Some(payload) = reg_rx.recv().await {
                 if let Ok(msg) = serde_json::from_slice::<RegisterMsg>(&payload) {
-                    eprintln!("[distributed] agent registered: {}", msg.agent_id);
+                    tracing::info!("agent registered: {}", msg.agent_id);
                     registered.push(msg.agent_id);
                 }
             }
@@ -426,10 +423,7 @@ async fn run_with_embedded_broker(
         };
         let payload = serde_json::to_vec(&msg)?;
         broker::publish(&broker, &subject_shard(agent_id), &payload).await;
-        eprintln!(
-            "[distributed] sent plan shard to {agent_id} ({} RPS, start_at +2s)",
-            msg.plan.rps
-        );
+        tracing::info!(agent_id, rps = msg.plan.rps, "sent plan shard (start_at +2s)");
     }
 
     aggregate_loop(&mut metrics_rx, n_agents, &shared_snapshot, sink).await?;
@@ -482,11 +476,7 @@ async fn aggregate_loop(
                     if !timed_out.contains(agent_id)
                         && now.duration_since(seen).as_secs() > AGENT_TIMEOUT_SECS
                     {
-                        eprintln!(
-                            "[distributed] WARNING: agent {agent_id} has not reported \
-                             for {}s — treating as timed-out",
-                            AGENT_TIMEOUT_SECS
-                        );
+                        tracing::warn!(agent_id, timeout_secs = AGENT_TIMEOUT_SECS, "agent has not reported — treating as timed-out");
                         timed_out.insert(agent_id.clone());
                         effective_agents = effective_agents.saturating_sub(1);
                     }
@@ -519,7 +509,7 @@ async fn aggregate_loop(
                 if let Ok(msg) = serde_json::from_slice::<AgentMetricsMsg>(&payload) {
                     // If a timed-out agent recovers, restore it.
                     if timed_out.remove(&msg.agent_id) {
-                        eprintln!("[distributed] agent {} recovered", msg.agent_id);
+                        tracing::info!("agent {} recovered", msg.agent_id);
                         effective_agents = (effective_agents + 1).min(n_agents);
                     }
                     last_seen.insert(msg.agent_id.clone(), std::time::Instant::now());
@@ -576,7 +566,7 @@ pub async fn run_with_nats_url(
 ) -> Result<()> {
     use crate::nats_client::NatsClient;
 
-    eprintln!("[distributed] connecting to external NATS at {nats_url}");
+    tracing::info!("connecting to external NATS at {nats_url}");
     let mut nats = match token {
         Some(t) => NatsClient::connect_authenticated(nats_url, t).await,
         None => NatsClient::connect(nats_url).await,
@@ -587,9 +577,7 @@ pub async fn run_with_nats_url(
     nats.subscribe(subject_metrics(), "metrics").await?;
 
     // Wait for N agents (5 min timeout for remote agents).
-    eprintln!(
-        "[distributed] waiting for {n_agents} remote agent(s) to register (timeout: 300s)..."
-    );
+    tracing::info!(n_agents, "waiting for remote agents to register (timeout: 300s)");
     let mut registered: Vec<String> = Vec::new();
 
     let reg_deadline = tokio::time::sleep(Duration::from_secs(300));
@@ -607,7 +595,7 @@ pub async fn run_with_nats_url(
             Ok((subject, payload)) = nats.next_message() => {
                 if subject == subject_register() {
                     if let Ok(msg) = serde_json::from_slice::<RegisterMsg>(&payload) {
-                        eprintln!("[distributed] agent registered: {}", msg.agent_id);
+                        tracing::info!("agent registered: {}", msg.agent_id);
                         registered.push(msg.agent_id.clone());
                         if registered.len() >= n_agents { break; }
                     }
@@ -633,10 +621,7 @@ pub async fn run_with_nats_url(
         };
         let payload = serde_json::to_vec(&msg)?;
         nats.publish(&subject_shard(agent_id), &payload).await?;
-        eprintln!(
-            "[distributed] sent shard to {agent_id} ({} RPS, start_at +2s)",
-            msg.plan.rps
-        );
+        tracing::info!(agent_id, rps = msg.plan.rps, "sent shard (start_at +2s)");
     }
 
     // Aggregate metrics via a channel fed from the NATS read loop.

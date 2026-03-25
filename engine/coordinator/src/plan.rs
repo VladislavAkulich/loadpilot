@@ -1,5 +1,6 @@
 /// Shared plan structures deserialized from the JSON produced by the Python CLI.
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -13,16 +14,45 @@ pub enum Mode {
     Spike,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum HttpMethod {
+    #[default]
+    #[serde(rename = "GET")]
+    Get,
+    #[serde(rename = "POST")]
+    Post,
+    #[serde(rename = "PUT")]
+    Put,
+    #[serde(rename = "PATCH")]
+    Patch,
+    #[serde(rename = "DELETE")]
+    Delete,
+}
+
+impl TryFrom<&str> for HttpMethod {
+    type Error = anyhow::Error;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s.to_uppercase().as_str() {
+            "GET" => Ok(HttpMethod::Get),
+            "POST" => Ok(HttpMethod::Post),
+            "PUT" => Ok(HttpMethod::Put),
+            "PATCH" => Ok(HttpMethod::Patch),
+            "DELETE" => Ok(HttpMethod::Delete),
+            other => anyhow::bail!("Unknown HTTP method: {other}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TaskPlan {
     pub name: String,
     #[serde(default = "default_weight")]
     pub weight: u32,
     pub url: String,
-    #[serde(default = "default_method")]
-    pub method: String,
     #[serde(default)]
-    pub headers: HashMap<String, String>,
+    pub method: HttpMethod,
+    #[serde(default)]
+    pub headers: Arc<HashMap<String, String>>,
     #[serde(default)]
     pub body_template: Option<String>,
 }
@@ -57,7 +87,7 @@ mod tests {
         let plan: ScenarioPlan = serde_json::from_str(&json).unwrap();
         assert_eq!(plan.tasks.len(), 1);
         assert_eq!(plan.tasks[0].name, "ping");
-        assert_eq!(plan.tasks[0].method, "GET");
+        assert_eq!(plan.tasks[0].method, HttpMethod::Get);
         assert_eq!(plan.tasks[0].weight, 1); // default
     }
 
@@ -65,7 +95,7 @@ mod tests {
     fn deserialize_task_default_method_is_get() {
         let json = minimal_plan_json(r#","tasks":[{"name":"t","url":"/"}]"#);
         let plan: ScenarioPlan = serde_json::from_str(&json).unwrap();
-        assert_eq!(plan.tasks[0].method, "GET");
+        assert_eq!(plan.tasks[0].method, HttpMethod::Get);
     }
 
     #[test]
@@ -93,16 +123,12 @@ mod tests {
         let re_serialized = serde_json::to_string(&plan).unwrap();
         let plan2: ScenarioPlan = serde_json::from_str(&re_serialized).unwrap();
         assert_eq!(plan2.tasks[0].weight, 3);
-        assert_eq!(plan2.tasks[0].method, "POST");
+        assert_eq!(plan2.tasks[0].method, HttpMethod::Post);
     }
 }
 
 fn default_weight() -> u32 {
     1
-}
-
-fn default_method() -> String {
-    "GET".to_string()
 }
 
 /// Per-VUser pre-authenticated header set extracted by the coordinator's on_start

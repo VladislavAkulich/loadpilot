@@ -13,6 +13,8 @@ use std::time::Instant;
 use anyhow::{anyhow, Result};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+
+use crate::plan::HttpMethod;
 use tokio::sync::{mpsc, oneshot};
 
 // ── RustResponse ──────────────────────────────────────────────────────────────
@@ -119,7 +121,8 @@ impl RustClient {
         let url = self.build_url(path);
         let client = self.http_client.clone();
         let handle = self.rt_handle.clone();
-        let method_upper = method.to_uppercase();
+        let http_method = HttpMethod::try_from(method)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
         let t0 = Instant::now();
         // Release the GIL while waiting for the HTTP response so other VUser
@@ -127,13 +130,12 @@ impl RustClient {
         // are Send Rust types — no Python objects cross the allow_threads boundary.
         let http_result = py.detach(|| {
             handle.block_on(async move {
-                let mut req = match method_upper.as_str() {
-                    "GET" => client.get(&url),
-                    "POST" => client.post(&url),
-                    "PUT" => client.put(&url),
-                    "PATCH" => client.patch(&url),
-                    "DELETE" => client.delete(&url),
-                    other => return Err(format!("Unknown HTTP method: {}", other)),
+                let mut req = match http_method {
+                    HttpMethod::Get => client.get(&url),
+                    HttpMethod::Post => client.post(&url),
+                    HttpMethod::Put => client.put(&url),
+                    HttpMethod::Patch => client.patch(&url),
+                    HttpMethod::Delete => client.delete(&url),
                 };
                 for (k, v) in &req_headers {
                     req = req.header(k.as_str(), v.as_str());
@@ -231,7 +233,7 @@ impl RustClient {
     ) -> PyResult<Vec<Py<RustResponse>>> {
         // Parse all request specs while holding the GIL — nothing async yet.
         struct ReqSpec {
-            method: String,
+            method: HttpMethod,
             url: String,
             headers: HashMap<String, String>,
             body: Option<String>,
@@ -242,12 +244,13 @@ impl RustClient {
             .iter()
             .map(|item| {
                 let d = item.cast::<PyDict>()?;
-                let method = d
+                let method_str = d
                     .get_item("method")?
                     .map(|v| v.extract::<String>())
                     .transpose()?
-                    .unwrap_or_else(|| "GET".to_string())
-                    .to_uppercase();
+                    .unwrap_or_else(|| "GET".to_string());
+                let method = HttpMethod::try_from(method_str.as_str())
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
                 let path: String = d
                     .get_item("path")?
                     .ok_or_else(|| {
@@ -321,16 +324,12 @@ impl RustClient {
                     let c = client.clone();
                     set.spawn(async move {
                         let t0 = Instant::now();
-                        let mut req = match spec.method.as_str() {
-                            "GET" => c.get(&spec.url),
-                            "POST" => c.post(&spec.url),
-                            "PUT" => c.put(&spec.url),
-                            "PATCH" => c.patch(&spec.url),
-                            "DELETE" => c.delete(&spec.url),
-                            other => {
-                                let ms = t0.elapsed().as_millis() as u64;
-                                return Err((ms, format!("Unknown method: {}", other)));
-                            }
+                        let mut req = match spec.method {
+                            HttpMethod::Get => c.get(&spec.url),
+                            HttpMethod::Post => c.post(&spec.url),
+                            HttpMethod::Put => c.put(&spec.url),
+                            HttpMethod::Patch => c.patch(&spec.url),
+                            HttpMethod::Delete => c.delete(&spec.url),
                         };
                         for (k, v) in &spec.headers {
                             req = req.header(k.as_str(), v.as_str());
@@ -763,7 +762,7 @@ fn do_run_task(
             match vuser.call_method1(check_name.as_str(), (status_py, body_py)) {
                 Ok(_) => false,
                 Err(e) => {
-                    eprintln!("[loadpilot] check_{} failed: {}", task_name, e);
+                    tracing::warn!(task = task_name, error = %e, "check failed");
                     true
                 }
             }

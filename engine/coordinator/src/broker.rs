@@ -128,7 +128,7 @@ pub async fn start(addr: &str) -> Result<BrokerHandle> {
                     tokio::spawn(handle_client(stream, b));
                 }
                 Err(e) => {
-                    eprintln!("[broker] accept error: {e}");
+                    tracing::warn!("accept error: {e}");
                     break;
                 }
             }
