@@ -46,6 +46,40 @@ jobs:
         working-directory: engine
         run: cargo clippy --package coordinator -- -D warnings
 
+  # ── Security audit ───────────────────────────────────────────────────────────
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        working-directory: engine
+        run: cargo audit
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Copy README for package build
+        run: cp README.md cli/README.md
+
+      - name: Install dependencies
+        working-directory: cli
+        run: uv sync --extra dev
+
+      - name: pip-audit
+        working-directory: cli
+        run: uv run pip-audit
+
   # ── Rust: unit tests + coverage ──────────────────────────────────────────────
   rust:
     name: Rust tests
