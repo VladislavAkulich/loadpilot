@@ -21,6 +21,8 @@ use tokio::time::sleep;
 
 use std::sync::RwLock;
 
+use tokio::sync::watch;
+
 use crate::metrics::{LatencySnapshot, MetricSink, Metrics, TaskSnapshot};
 use crate::plan::{HttpMethod, Mode, ScenarioPlan, TaskPlan};
 use crate::python_bridge::PythonBridge;
@@ -67,7 +69,12 @@ impl Coordinator {
         }
     }
 
-    pub async fn run(self, shared_snapshot: SharedSnapshot, sink: MetricSink) -> Result<()> {
+    pub async fn run(
+        self,
+        shared_snapshot: SharedSnapshot,
+        sink: MetricSink,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) -> Result<()> {
         anyhow::ensure!(!self.plan.tasks.is_empty(), "plan contains no tasks");
         let plan = Arc::new(self.plan);
         let metrics = self.metrics;
@@ -223,7 +230,15 @@ impl Coordinator {
         let mut deficit = 0.0f64; // fractional request accumulator
 
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ticker.tick() => {}
+                Ok(()) = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        tracing::info!("shutdown signal — stopping dispatcher");
+                        break;
+                    }
+                }
+            }
 
             let elapsed = start.elapsed();
             if elapsed >= total {
@@ -315,8 +330,7 @@ impl Coordinator {
                         active_clone2.fetch_add(1, Ordering::Relaxed);
                         let t0 = Instant::now();
                         let result =
-                            execute_request(&client, method, &url, &headers, body.as_deref())
-                                .await;
+                            execute_request(&client, method, &url, &headers, body.as_deref()).await;
                         let latency_ms = t0.elapsed().as_millis() as u64;
                         match result {
                             Ok(r) if r.status < 400 => {
@@ -332,7 +346,20 @@ impl Coordinator {
 
         // ── Teardown ──────────────────────────────────────────────────────────
         done_flag.store(true, Ordering::Relaxed);
-        sleep(Duration::from_millis(1200)).await;
+
+        // Drain in-flight requests: wait until active_workers reaches zero or 30s.
+        let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while active_workers.load(Ordering::Relaxed) > 0
+            && tokio::time::Instant::now() < drain_deadline
+        {
+            sleep(Duration::from_millis(100)).await;
+        }
+        if active_workers.load(Ordering::Relaxed) > 0 {
+            tracing::warn!(
+                "drain timeout — {} requests still in flight",
+                active_workers.load(Ordering::Relaxed)
+            );
+        }
 
         // Call on_stop for all VUsers, then signal threads to exit.
         if let Some(ref b) = bridge {
@@ -636,7 +663,9 @@ mod tests {
     fn pick_task_higher_weight_selected_more() {
         // weights: a=1, b=3 → total=4; slots 0→a, 1,2,3→b
         let tasks = vec![make_task("a", 1), make_task("b", 3)];
-        let names: Vec<&str> = (0..4).map(|i| pick_task(&tasks, i).unwrap().name.as_str()).collect();
+        let names: Vec<&str> = (0..4)
+            .map(|i| pick_task(&tasks, i).unwrap().name.as_str())
+            .collect();
         assert_eq!(names, vec!["a", "b", "b", "b"]);
     }
 

@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::{
     process::Command,
+    sync::watch,
     time::{interval, sleep, timeout},
 };
 
@@ -355,6 +356,7 @@ async fn run_with_embedded_broker(
     shared_snapshot: SharedSnapshot,
     sink: MetricSink,
     spawn: bool,
+    shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<()> {
     tracing::info!("starting embedded broker on {broker_addr}");
     let broker = broker::start(broker_addr)
@@ -386,7 +388,9 @@ async fn run_with_embedded_broker(
         }
         let _ = run_id; // kept for potential future use
     } else {
-        tracing::info!("embedded broker ready — waiting for {n_agents} external agent(s) on {broker_addr}");
+        tracing::info!(
+            "embedded broker ready — waiting for {n_agents} external agent(s) on {broker_addr}"
+        );
     }
 
     // Registration timeout: 30s for local agents, 5 min for external.
@@ -423,15 +427,48 @@ async fn run_with_embedded_broker(
         };
         let payload = serde_json::to_vec(&msg)?;
         broker::publish(&broker, &subject_shard(agent_id), &payload).await;
-        tracing::info!(agent_id, rps = msg.plan.rps, "sent plan shard (start_at +2s)");
+        tracing::info!(
+            agent_id,
+            rps = msg.plan.rps,
+            "sent plan shard (start_at +2s)"
+        );
     }
 
-    aggregate_loop(&mut metrics_rx, n_agents, &shared_snapshot, sink).await?;
+    let shutdown = aggregate_loop(
+        &mut metrics_rx,
+        n_agents,
+        &shared_snapshot,
+        sink,
+        shutdown_rx,
+    )
+    .await?;
 
+    // Send "stop" to all agents regardless of how the loop exited.
     let stop = serde_json::to_vec(&ControlMsg {
         command: "stop".to_string(),
     })?;
     broker::publish(&broker, subject_control(), &stop).await;
+
+    if shutdown {
+        // Drain: wait for agents to finish in-flight requests (up to 30s).
+        tracing::info!("draining agents after shutdown signal (up to 30s)...");
+        let _ = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+            while done.len() < n_agents {
+                match metrics_rx.recv().await {
+                    Some(payload) => {
+                        if let Ok(msg) = serde_json::from_slice::<AgentMetricsMsg>(&payload) {
+                            if msg.phase == "done" {
+                                done.insert(msg.agent_id);
+                            }
+                        }
+                    }
+                    None => break,
+                }
+            }
+        })
+        .await;
+    }
 
     sleep(Duration::from_millis(500)).await;
 
@@ -448,6 +485,9 @@ const AGENT_TIMEOUT_SECS: u64 = 15;
 /// Metrics aggregation loop — shared by embedded and external NATS modes.
 /// Reads from `metrics_rx`, emits aggregated JSON to stdout, updates Prometheus.
 ///
+/// Returns `true` if the loop exited due to a shutdown signal (caller should
+/// drain in-flight requests), `false` if all agents completed normally.
+///
 /// NATS SPOF protection: if an agent stops reporting for AGENT_TIMEOUT_SECS,
 /// it is marked as timed-out and excluded from the completion count so the
 /// test can still finish even if one agent dies.
@@ -456,18 +496,19 @@ async fn aggregate_loop(
     n_agents: usize,
     shared_snapshot: &SharedSnapshot,
     sink: MetricSink,
-) -> Result<()> {
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> Result<bool> {
     let mut last_snapshots: std::collections::HashMap<String, AgentMetricsMsg> =
         std::collections::HashMap::new();
     let mut last_seen: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
     let mut timed_out: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut done_agents: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut tick = interval(Duration::from_secs(1));
-    let mut done_count = 0;
     // effective_agents shrinks when agents time out.
     let mut effective_agents = n_agents;
 
-    loop {
+    let shutdown_triggered = 'agg: loop {
         tokio::select! {
             _ = tick.tick() => {
                 // Check for timed-out agents.
@@ -500,8 +541,8 @@ async fn aggregate_loop(
                 sink(serde_json::to_string(&agg)?);
                 update_prometheus(shared_snapshot, &agg);
 
-                if done_count + timed_out.len() >= effective_agents.max(1) {
-                    break;
+                if done_agents.len() + timed_out.len() >= effective_agents.max(1) {
+                    break 'agg false;
                 }
             }
 
@@ -513,20 +554,27 @@ async fn aggregate_loop(
                         effective_agents = (effective_agents + 1).min(n_agents);
                     }
                     last_seen.insert(msg.agent_id.clone(), std::time::Instant::now());
-                    if msg.phase == "done" { done_count += 1; }
+                    if msg.phase == "done" { done_agents.insert(msg.agent_id.clone()); }
                     last_snapshots.insert(msg.agent_id.clone(), msg);
                 }
             }
-        }
-    }
 
-    // Final snapshot.
+            Ok(()) = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    tracing::info!("shutdown signal — stopping test");
+                    break 'agg true;
+                }
+            }
+        }
+    };
+
+    // Always emit a final snapshot regardless of how we exited.
     let snaps: Vec<AgentMetricsMsg> = last_snapshots.into_values().collect();
     let agg = aggregate(&snaps);
     sink(serde_json::to_string(&agg)?);
     update_prometheus(shared_snapshot, &agg);
 
-    Ok(())
+    Ok(shutdown_triggered)
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -538,8 +586,18 @@ pub async fn run(
     broker_addr: &str,
     shared_snapshot: SharedSnapshot,
     sink: MetricSink,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    run_with_embedded_broker(plan, n_agents, broker_addr, shared_snapshot, sink, true).await
+    run_with_embedded_broker(
+        plan,
+        n_agents,
+        broker_addr,
+        shared_snapshot,
+        sink,
+        true,
+        &mut shutdown_rx,
+    )
+    .await
 }
 
 /// Embedded broker + wait for N externally started agents (no spawning).
@@ -550,8 +608,18 @@ pub async fn run_external_agents(
     broker_addr: &str,
     shared_snapshot: SharedSnapshot,
     sink: MetricSink,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    run_with_embedded_broker(plan, n_agents, broker_addr, shared_snapshot, sink, false).await
+    run_with_embedded_broker(
+        plan,
+        n_agents,
+        broker_addr,
+        shared_snapshot,
+        sink,
+        false,
+        &mut shutdown_rx,
+    )
+    .await
 }
 
 /// Connect to an external NATS server and wait for N remote agents.
@@ -563,6 +631,7 @@ pub async fn run_with_nats_url(
     token: Option<&str>,
     shared_snapshot: SharedSnapshot,
     sink: MetricSink,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     use crate::nats_client::NatsClient;
 
@@ -577,7 +646,10 @@ pub async fn run_with_nats_url(
     nats.subscribe(subject_metrics(), "metrics").await?;
 
     // Wait for N agents (5 min timeout for remote agents).
-    tracing::info!(n_agents, "waiting for remote agents to register (timeout: 300s)");
+    tracing::info!(
+        n_agents,
+        "waiting for remote agents to register (timeout: 300s)"
+    );
     let mut registered: Vec<String> = Vec::new();
 
     let reg_deadline = tokio::time::sleep(Duration::from_secs(300));
@@ -624,28 +696,73 @@ pub async fn run_with_nats_url(
         tracing::info!(agent_id, rps = msg.plan.rps, "sent shard (start_at +2s)");
     }
 
+    // Channel to signal the NATS reader task to publish "stop" and exit.
+    let (nats_stop_tx, mut nats_stop_rx) = watch::channel(false);
+    let stop_payload = serde_json::to_vec(&ControlMsg {
+        command: "stop".to_string(),
+    })?;
+
     // Aggregate metrics via a channel fed from the NATS read loop.
     let (metrics_tx, mut metrics_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
-    // Spawn a task that reads all remaining NATS messages and routes metrics.
+    // Spawn a task that reads NATS messages, forwards metrics, and sends "stop"
+    // to agents when signalled.
     tokio::spawn(async move {
         loop {
-            match nats.next_message().await {
-                Ok((subject, payload)) if subject.starts_with("loadpilot.metrics.") => {
-                    if metrics_tx.send(payload).is_err() {
-                        break;
+            tokio::select! {
+                Ok(()) = nats_stop_rx.changed() => {
+                    if *nats_stop_rx.borrow() {
+                        let _ = nats.publish(subject_control(), &stop_payload).await;
+                        // Continue reading so the drain loop below can collect "done" messages.
                     }
                 }
-                Ok(_) => {} // ignore other subjects (register, control echoes)
-                Err(_) => break,
+                result = nats.next_message() => {
+                    match result {
+                        Ok((subject, payload)) if subject.starts_with("loadpilot.metrics.") => {
+                            if metrics_tx.send(payload).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(_) => {} // ignore other subjects
+                        Err(_) => break,
+                    }
+                }
             }
         }
     });
 
-    aggregate_loop(&mut metrics_rx, n_agents, &shared_snapshot, sink).await?;
+    let shutdown = aggregate_loop(
+        &mut metrics_rx,
+        n_agents,
+        &shared_snapshot,
+        sink,
+        &mut shutdown_rx,
+    )
+    .await?;
 
-    // Note: we don't publish "stop" here because we can't — nats was moved into the task.
-    // Remote agents will stop on their own when the plan duration expires.
+    // Signal the NATS task to publish "stop" (always, not just on shutdown).
+    let _ = nats_stop_tx.send(true);
+
+    if shutdown {
+        // Drain: wait for agents to finish in-flight requests (up to 30s).
+        tracing::info!("draining agents after shutdown signal (up to 30s)...");
+        let _ = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+            while done.len() < n_agents {
+                match metrics_rx.recv().await {
+                    Some(payload) => {
+                        if let Ok(msg) = serde_json::from_slice::<AgentMetricsMsg>(&payload) {
+                            if msg.phase == "done" {
+                                done.insert(msg.agent_id);
+                            }
+                        }
+                    }
+                    None => break,
+                }
+            }
+        })
+        .await;
+    }
 
     sleep(Duration::from_millis(500)).await;
 
@@ -811,7 +928,13 @@ mod tests {
 
     // ── aggregate_tasks ───────────────────────────────────────────────────────
 
-    fn make_task_wire(name: &str, requests: u64, errors: u64, buckets: Vec<[u64; 2]>, mean_ms: f64) -> TaskWireSnapshot {
+    fn make_task_wire(
+        name: &str,
+        requests: u64,
+        errors: u64,
+        buckets: Vec<[u64; 2]>,
+        mean_ms: f64,
+    ) -> TaskWireSnapshot {
         TaskWireSnapshot {
             name: name.to_string(),
             requests,
@@ -853,9 +976,10 @@ mod tests {
 
     #[test]
     fn aggregate_tasks_single_agent_single_task() {
-        let agent = make_agent_with_tasks("a0", vec![
-            make_task_wire("login", 10, 2, vec![[50, 10]], 50.0),
-        ]);
+        let agent = make_agent_with_tasks(
+            "a0",
+            vec![make_task_wire("login", 10, 2, vec![[50, 10]], 50.0)],
+        );
         let tasks = aggregate_tasks(&[agent]);
         assert_eq!(tasks.len(), 1);
         let t = &tasks[0];
@@ -868,12 +992,14 @@ mod tests {
     #[test]
     fn aggregate_tasks_merges_same_task_across_agents() {
         // Two agents each do 10 reqs for "search"
-        let a0 = make_agent_with_tasks("a0", vec![
-            make_task_wire("search", 10, 0, vec![[20, 10]], 20.0),
-        ]);
-        let a1 = make_agent_with_tasks("a1", vec![
-            make_task_wire("search", 10, 1, vec![[40, 10]], 40.0),
-        ]);
+        let a0 = make_agent_with_tasks(
+            "a0",
+            vec![make_task_wire("search", 10, 0, vec![[20, 10]], 20.0)],
+        );
+        let a1 = make_agent_with_tasks(
+            "a1",
+            vec![make_task_wire("search", 10, 1, vec![[40, 10]], 40.0)],
+        );
         let tasks = aggregate_tasks(&[a0, a1]);
         assert_eq!(tasks.len(), 1);
         let t = &tasks[0];
@@ -890,12 +1016,14 @@ mod tests {
         // Agent 1: "api" — 100 reqs all at 200ms
         // Simple average p99 = (10+200)/2 = 105ms ← WRONG
         // Merged     p99 = 200ms                   ← CORRECT
-        let a0 = make_agent_with_tasks("a0", vec![
-            make_task_wire("api", 100, 0, vec![[10, 100]], 10.0),
-        ]);
-        let a1 = make_agent_with_tasks("a1", vec![
-            make_task_wire("api", 100, 0, vec![[200, 100]], 200.0),
-        ]);
+        let a0 = make_agent_with_tasks(
+            "a0",
+            vec![make_task_wire("api", 100, 0, vec![[10, 100]], 10.0)],
+        );
+        let a1 = make_agent_with_tasks(
+            "a1",
+            vec![make_task_wire("api", 100, 0, vec![[200, 100]], 200.0)],
+        );
         let tasks = aggregate_tasks(&[a0, a1]);
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].latency.p99_ms, 200.0);
@@ -904,11 +1032,14 @@ mod tests {
 
     #[test]
     fn aggregate_tasks_multiple_tasks_sorted_by_name() {
-        let agent = make_agent_with_tasks("a0", vec![
-            make_task_wire("search", 5, 0, vec![[30, 5]], 30.0),
-            make_task_wire("login",  5, 0, vec![[10, 5]], 10.0),
-            make_task_wire("checkout", 5, 0, vec![[50, 5]], 50.0),
-        ]);
+        let agent = make_agent_with_tasks(
+            "a0",
+            vec![
+                make_task_wire("search", 5, 0, vec![[30, 5]], 30.0),
+                make_task_wire("login", 5, 0, vec![[10, 5]], 10.0),
+                make_task_wire("checkout", 5, 0, vec![[50, 5]], 50.0),
+            ],
+        );
         let tasks = aggregate_tasks(&[agent]);
         assert_eq!(tasks.len(), 3);
         assert_eq!(tasks[0].name, "checkout");
@@ -918,12 +1049,9 @@ mod tests {
 
     #[test]
     fn aggregate_tasks_max_min_derived_from_merged_histogram() {
-        let a0 = make_agent_with_tasks("a0", vec![
-            make_task_wire("t", 1, 0, vec![[500, 1]], 500.0),
-        ]);
-        let a1 = make_agent_with_tasks("a1", vec![
-            make_task_wire("t", 1, 0, vec![[10, 1]], 10.0),
-        ]);
+        let a0 =
+            make_agent_with_tasks("a0", vec![make_task_wire("t", 1, 0, vec![[500, 1]], 500.0)]);
+        let a1 = make_agent_with_tasks("a1", vec![make_task_wire("t", 1, 0, vec![[10, 1]], 10.0)]);
         let tasks = aggregate_tasks(&[a0, a1]);
         assert_eq!(tasks[0].latency.max_ms, 500.0);
         assert_eq!(tasks[0].latency.min_ms, 10.0);
@@ -941,9 +1069,10 @@ mod tests {
     #[test]
     fn aggregate_includes_tasks_via_aggregate_fn() {
         // aggregate() must populate the tasks field.
-        let agent = make_agent_with_tasks("a0", vec![
-            make_task_wire("ping", 10, 0, vec![[5, 10]], 5.0),
-        ]);
+        let agent = make_agent_with_tasks(
+            "a0",
+            vec![make_task_wire("ping", 10, 0, vec![[5, 10]], 5.0)],
+        );
         let agg = aggregate(&[agent]);
         assert_eq!(agg.tasks.len(), 1);
         assert_eq!(agg.tasks[0].name, "ping");

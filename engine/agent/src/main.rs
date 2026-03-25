@@ -11,9 +11,9 @@ mod runner;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 use serde::{Deserialize, Serialize};
 use tokio::time::{interval, sleep, Duration};
+use tracing_subscriber::EnvFilter;
 
 use crate::nats::NatsClient;
 use crate::runner::run_load;
@@ -65,6 +65,26 @@ struct ControlMsg {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    ctrl_c.await;
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -74,18 +94,35 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        tracing::info!("shutdown signal — will not reconnect after current run");
+        let _ = shutdown_tx.send(true);
+    });
+
     loop {
         match run_once(&args).await {
             Ok(()) => {
+                if *shutdown_rx.borrow() {
+                    tracing::info!(agent_id = %args.agent_id, "run complete — exiting (shutdown)");
+                    break;
+                }
                 tracing::info!(agent_id = %args.agent_id, "run complete — reconnecting in 2s");
                 sleep(Duration::from_secs(2)).await;
             }
             Err(e) => {
+                if *shutdown_rx.borrow() {
+                    tracing::warn!(agent_id = %args.agent_id, "error: {e} — exiting (shutdown)");
+                    break;
+                }
                 tracing::warn!(agent_id = %args.agent_id, "error: {e} — reconnecting in 5s");
                 sleep(Duration::from_secs(5)).await;
             }
         }
     }
+
+    Ok(())
 }
 
 async fn run_once(args: &Args) -> Result<()> {

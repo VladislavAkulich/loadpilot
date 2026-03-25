@@ -23,6 +23,8 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
+use tokio::sync::watch;
+
 use crate::{
     coordinator::SharedSnapshot, distributed, metrics::MetricSink, plan::ScenarioPlan,
     prometheus_server,
@@ -34,6 +36,7 @@ struct ServeState {
     nats_token: Option<String>,
     busy: AtomicBool,
     shared_snapshot: SharedSnapshot,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 pub async fn run(
@@ -41,6 +44,7 @@ pub async fn run(
     n_agents: usize,
     nats_token: Option<String>,
     shared_snapshot: SharedSnapshot,
+    shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     // Start Prometheus on 9090.
     let prom = Arc::clone(&shared_snapshot);
@@ -56,6 +60,7 @@ pub async fn run(
         nats_token,
         busy: AtomicBool::new(false),
         shared_snapshot,
+        shutdown_rx: shutdown_rx.clone(),
     });
 
     let app = Router::new()
@@ -65,7 +70,18 @@ pub async fn run(
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     tracing::info!("listening on 0.0.0.0:8080");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let mut rx = shutdown_rx;
+            // Wait until shutdown is signalled.
+            while rx.changed().await.is_ok() {
+                if *rx.borrow() {
+                    break;
+                }
+            }
+            tracing::info!("serve mode: shutdown signal — stopping HTTP server");
+        })
+        .await?;
     Ok(())
 }
 
@@ -110,6 +126,7 @@ async fn run_handler(State(state): State<Arc<ServeState>>, body: String) -> Resp
             state2.nats_token.as_deref(),
             Arc::clone(&state2.shared_snapshot),
             sink,
+            state2.shutdown_rx.clone(),
         )
         .await;
         if let Err(e) = result {

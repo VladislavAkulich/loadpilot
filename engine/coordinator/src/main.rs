@@ -12,10 +12,34 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use clap::Parser;
+use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
 use crate::coordinator::SharedSnapshot;
 use crate::metrics::stdout_sink;
+
+/// Resolves on Ctrl+C (all platforms) or SIGTERM (Unix).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    ctrl_c.await;
+}
 
 #[derive(Parser)]
 #[command(name = "coordinator", about = "LoadPilot coordinator process")]
@@ -69,6 +93,14 @@ async fn main() -> Result<()> {
     // Prometheus runs in all modes.
     let shared_snapshot: SharedSnapshot = Arc::new(RwLock::new(None));
 
+    // Graceful shutdown: fires on Ctrl+C or SIGTERM.
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        tracing::info!("shutdown signal — initiating graceful shutdown");
+        let _ = shutdown_tx.send(true);
+    });
+
     if args.serve {
         let nats_url = args
             .nats_url
@@ -78,6 +110,7 @@ async fn main() -> Result<()> {
             args.serve_agents,
             args.nats_token,
             shared_snapshot,
+            shutdown_rx,
         )
         .await;
     }
@@ -110,6 +143,7 @@ async fn main() -> Result<()> {
             args.nats_token.as_deref(),
             shared_snapshot,
             stdout_sink(),
+            shutdown_rx,
         )
         .await?;
     } else if args.local_agents > 0 {
@@ -119,6 +153,7 @@ async fn main() -> Result<()> {
             &args.broker_addr,
             shared_snapshot,
             stdout_sink(),
+            shutdown_rx,
         )
         .await?;
     } else if args.external_agents > 0 {
@@ -128,11 +163,14 @@ async fn main() -> Result<()> {
             &args.broker_addr,
             shared_snapshot,
             stdout_sink(),
+            shutdown_rx,
         )
         .await?;
     } else {
         let coord = coordinator::Coordinator::new(plan);
-        coord.run(shared_snapshot, stdout_sink()).await?;
+        coord
+            .run(shared_snapshot, stdout_sink(), shutdown_rx)
+            .await?;
     }
 
     Ok(())
