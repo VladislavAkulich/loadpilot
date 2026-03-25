@@ -65,19 +65,14 @@ pub struct VUserConfig {
     pub task_urls: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     Constant,
+    #[default]
     Ramp,
     Step,
     Spike,
-}
-
-impl Default for Mode {
-    fn default() -> Self {
-        Mode::Ramp
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

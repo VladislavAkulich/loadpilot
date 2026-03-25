@@ -449,7 +449,7 @@ fn compute_phase_and_rps(elapsed_secs: f64, plan: &ScenarioPlan) -> (Phase, f64)
     }
 }
 
-fn pick_task<'a>(tasks: &'a [TaskPlan], index: usize) -> Option<&'a TaskPlan> {
+fn pick_task(tasks: &[TaskPlan], index: usize) -> Option<&TaskPlan> {
     if tasks.is_empty() {
         return None;
     }
