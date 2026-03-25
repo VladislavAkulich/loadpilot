@@ -78,7 +78,9 @@ jobs:
 
       - name: pip-audit
         working-directory: cli
-        run: uv run pip-audit
+        # CVE-2026-4539: pygments fix not yet released on PyPI (2026-03-20).
+        # Remove --ignore-vuln once pygments publishes a patched version.
+        run: uv run pip-audit --ignore-vuln CVE-2026-4539
 
   # ── Rust: unit tests + coverage ──────────────────────────────────────────────
   rust:

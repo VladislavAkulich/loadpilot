@@ -125,7 +125,11 @@ async fn make_tls_stream(
     use tokio_rustls::TlsConnector;
 
     let mut root_store = RootCertStore::empty();
-    for cert in rustls_native_certs::load_native_certs()? {
+    let certs = rustls_native_certs::load_native_certs();
+    for error in &certs.errors {
+        tracing::warn!("failed to load native TLS cert: {error}");
+    }
+    for cert in certs.certs {
         root_store.add(cert).ok();
     }
     if root_store.is_empty() {

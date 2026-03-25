@@ -49,6 +49,11 @@ lint-rust:
 fmt-rust:
     cd engine && cargo fmt
 
+# Security audit (requires: cargo install cargo-audit)
+audit:
+    cd engine && cargo audit
+    cd cli && uv run pip-audit
+
 # ── Combined ──────────────────────────────────────────────────────────────────
 
 # Run all tests (Python + Rust)
