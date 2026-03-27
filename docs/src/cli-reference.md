@@ -28,7 +28,7 @@ loadpilot run scenarios/checkout.py --target https://api.example.com
 | `--target`          | `http://localhost:8000` | Base URL of the system under test |
 | `--scenario`        | —                       | Scenario class name (required when a file defines multiple `@scenario` classes) |
 | `--report`          | off                     | Write an HTML report to this path after the test |
-| `--dry-run`         | off                     | Print the generated plan JSON and exit without running |
+| `--dry-run`         | off                     | Validate the scenario and print the generated plan JSON, then exit without running |
 | `--agents`          | `1`                     | Spawn N local agent processes (embedded NATS) |
 | `--external-agents` | `0`                     | Wait for N externally started agents to connect before starting |
 | `--nats-url`        | —                       | Connect to an external NATS server (use with `--external-agents`) |
@@ -36,6 +36,32 @@ loadpilot run scenarios/checkout.py --target https://api.example.com
 | `--results-json`    | off                     | Write final metrics as JSON to this path |
 | `--save-baseline`   | off                     | Save results as baseline to `.loadpilot/baseline.json` |
 | `--coordinator-url` | —                       | URL of an in-cluster coordinator (`POST /run`). When set the coordinator runs as a k8s pod instead of a local subprocess. Also readable from `LOADPILOT_COORDINATOR_URL`. |
+
+### Scenario validation
+
+LoadPilot validates the scenario plan before starting the coordinator.
+If the plan is invalid, the test does not run and errors are printed immediately:
+
+```
+Scenario validation failed:
+  • rps: rps must be > 0, got 0
+  • target_url: target_url must start with http:// or https://, got 'localhost:8080'
+  • plan: ramp_up (90s) exceeds duration (30s)
+```
+
+The following constraints are enforced:
+
+| Field | Constraint |
+|-------|-----------|
+| `rps` | > 0 |
+| `duration` | > 0 |
+| `ramp_up` | ≥ 0 and ≤ `duration` |
+| `target_url` | must be a valid `http://` or `https://` URL |
+| tasks | at least one `@task` method required |
+| task `weight` | > 0 |
+| task `method` | one of `GET`, `POST`, `PUT`, `PATCH`, `DELETE` |
+
+Use `--dry-run` to check validation without running the test.
 
 ### Examples
 
@@ -64,7 +90,7 @@ loadpilot run scenarios/checkout.py \
   --external-agents 2 \
   --report results/report.html
 
-# dry-run: inspect the generated plan
+# dry-run: validate the scenario and inspect the generated plan JSON
 loadpilot run scenarios/checkout.py --target https://api.example.com --dry-run
 
 # save baseline for future comparisons

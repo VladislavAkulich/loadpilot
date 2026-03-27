@@ -4,11 +4,11 @@
 
 | Parameter    | Type               | Default    | Description |
 |--------------|--------------------|------------|-------------|
-| `rps`        | `int`              | `10`       | Target RPS at peak load |
-| `duration`   | `str`              | `"1m"`     | Steady-state duration for `ramp`; total for other modes |
-| `ramp_up`    | `str`              | `"10s"`    | Ramp-up window (used only by `mode="ramp"`) |
+| `rps`        | `int`              | `10`       | Target RPS at peak load. Must be > 0. |
+| `duration`   | `str`              | `"1m"`     | Steady-state duration for `ramp`; total for other modes. Must be > 0. |
+| `ramp_up`    | `str`              | `"10s"`    | Ramp-up window (used only by `mode="ramp"`). Must be ≤ `duration`. |
 | `mode`       | `str`              | `"ramp"`   | Load profile: `ramp`, `constant`, `step`, `spike` |
-| `steps`      | `int`              | `5`        | Number of steps for `mode="step"` |
+| `steps`      | `int`              | `5`        | Number of steps for `mode="step"`. Must be ≥ 1. |
 | `thresholds` | `dict[str, float]` | `{}`       | SLA limits — exit code 1 if breached |
 
 ### Load profiles
@@ -35,11 +35,14 @@ All profiles work in distributed mode.
 
 | Parameter | Type  | Default | Description |
 |-----------|-------|---------|-------------|
-| `weight`  | `int` | `1`     | Relative frequency vs other tasks |
+| `weight`  | `int` | `1`     | Relative frequency vs other tasks. Must be > 0. |
 
 Tasks with higher `weight` are called proportionally more often. A scenario with
 `@task(weight=5) def browse` and `@task(weight=1) def purchase` will call `browse`
 5 times for every 1 call to `purchase`.
+
+A scenario must define at least one `@task` method. HTTP methods used inside tasks
+must be one of `GET`, `POST`, `PUT`, `PATCH`, `DELETE`.
 
 Tasks can be `async def` — LoadPilot drives them with a `coro.send(None)` fast path
 that avoids asyncio scheduling overhead for sync-body coroutines, with automatic

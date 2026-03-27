@@ -565,6 +565,15 @@ def run_command(
     except ValueError as exc:
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1)
+    except Exception as exc:
+        # Catches pydantic ValidationError (avoid importing it at top level).
+        if type(exc).__name__ == "ValidationError":
+            console.print("[red]Scenario validation failed:[/]")
+            for err in exc.errors():
+                loc = " → ".join(str(p) for p in err["loc"]) if err["loc"] else "plan"
+                console.print(f"  [red]•[/] {loc}: {err['msg']}")
+            raise typer.Exit(1)
+        raise
 
     # Apply --threshold CLI overrides on top of @scenario thresholds.
     if threshold:
