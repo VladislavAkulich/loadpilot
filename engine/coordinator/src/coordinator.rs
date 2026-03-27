@@ -372,6 +372,10 @@ impl Coordinator {
             b.shutdown();
         }
 
+        // Stop the periodic reporter first, so the final "done" snapshot is
+        // guaranteed to be the last line written to stdout.
+        let _ = reporter_handle.await;
+
         // Final "done" metrics snapshot.
         let elapsed = start.elapsed();
         let snap = MetricsSnapshot {
@@ -400,7 +404,6 @@ impl Coordinator {
             sink(line.clone());
         }
 
-        let _ = reporter_handle.await;
         Ok(())
     }
 }

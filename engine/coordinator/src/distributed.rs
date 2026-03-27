@@ -437,6 +437,7 @@ async fn run_with_embedded_broker(
     let shutdown = aggregate_loop(
         &mut metrics_rx,
         n_agents,
+        &registered,
         &shared_snapshot,
         sink,
         shutdown_rx,
@@ -450,27 +451,15 @@ async fn run_with_embedded_broker(
     broker::publish(&broker, subject_control(), &stop).await;
 
     if shutdown {
-        // Drain: wait for agents to finish in-flight requests (up to 30s).
-        tracing::info!("draining agents after shutdown signal (up to 30s)...");
-        let _ = tokio::time::timeout(Duration::from_secs(30), async {
-            let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
-            while done.len() < n_agents {
-                match metrics_rx.recv().await {
-                    Some(payload) => {
-                        if let Ok(msg) = serde_json::from_slice::<AgentMetricsMsg>(&payload) {
-                            if msg.phase == "done" {
-                                done.insert(msg.agent_id);
-                            }
-                        }
-                    }
-                    None => break,
-                }
-            }
-        })
-        .await;
+        // Agents receive "stop" and exit their metrics loop immediately;
+        // they do not send a final "done" snapshot. Give them a short window
+        // to complete any in-flight HTTP requests (typically < 200ms each)
+        // before we forcefully terminate the processes.
+        tracing::info!("shutdown: waiting 3s for agents to drain in-flight requests...");
+        sleep(Duration::from_secs(3)).await;
+    } else {
+        sleep(Duration::from_millis(500)).await;
     }
-
-    sleep(Duration::from_millis(500)).await;
 
     for mut child in children {
         let _ = child.kill().await;
@@ -491,17 +480,26 @@ const AGENT_TIMEOUT_SECS: u64 = 15;
 /// NATS SPOF protection: if an agent stops reporting for AGENT_TIMEOUT_SECS,
 /// it is marked as timed-out and excluded from the completion count so the
 /// test can still finish even if one agent dies.
+///
+/// `registered_agents` must contain every agent ID that received a shard.
+/// Pre-seeding last_seen with them ensures that agents which never emit a
+/// single metric are still caught by the timeout logic.
 async fn aggregate_loop(
     metrics_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     n_agents: usize,
+    registered_agents: &[String],
     shared_snapshot: &SharedSnapshot,
     sink: MetricSink,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<bool> {
     let mut last_snapshots: std::collections::HashMap<String, AgentMetricsMsg> =
         std::collections::HashMap::new();
+    // Pre-seed last_seen with every registered agent so that agents which never
+    // emit a metric (e.g. slow debug-build startup) are still caught by the
+    // AGENT_TIMEOUT_SECS timeout and don't stall the loop indefinitely.
+    let seed_time = std::time::Instant::now();
     let mut last_seen: std::collections::HashMap<String, std::time::Instant> =
-        std::collections::HashMap::new();
+        registered_agents.iter().map(|id| (id.clone(), seed_time)).collect();
     let mut timed_out: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut done_agents: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut tick = interval(Duration::from_secs(1));
@@ -734,6 +732,7 @@ pub async fn run_with_nats_url(
     let shutdown = aggregate_loop(
         &mut metrics_rx,
         n_agents,
+        &registered,
         &shared_snapshot,
         sink,
         &mut shutdown_rx,
@@ -744,27 +743,15 @@ pub async fn run_with_nats_url(
     let _ = nats_stop_tx.send(true);
 
     if shutdown {
-        // Drain: wait for agents to finish in-flight requests (up to 30s).
-        tracing::info!("draining agents after shutdown signal (up to 30s)...");
-        let _ = tokio::time::timeout(Duration::from_secs(30), async {
-            let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
-            while done.len() < n_agents {
-                match metrics_rx.recv().await {
-                    Some(payload) => {
-                        if let Ok(msg) = serde_json::from_slice::<AgentMetricsMsg>(&payload) {
-                            if msg.phase == "done" {
-                                done.insert(msg.agent_id);
-                            }
-                        }
-                    }
-                    None => break,
-                }
-            }
-        })
-        .await;
+        // Agents receive "stop" and exit their metrics loop immediately;
+        // they do not send a final "done" snapshot. Give them a short window
+        // to complete any in-flight HTTP requests (typically < 200ms each)
+        // before we forcefully terminate the processes.
+        tracing::info!("shutdown: waiting 3s for agents to drain in-flight requests...");
+        sleep(Duration::from_secs(3)).await;
+    } else {
+        sleep(Duration::from_millis(500)).await;
     }
-
-    sleep(Duration::from_millis(500)).await;
 
     Ok(())
 }

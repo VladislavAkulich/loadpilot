@@ -7,7 +7,15 @@ default:
 
 # ── Python ────────────────────────────────────────────────────────────────────
 
-# Run Python tests with coverage
+# Run pure unit tests (no coordinator binary required)
+test-unit:
+    cd cli && uv run pytest tests/ -v --ignore=tests/test_e2e_smoke.py --ignore=tests/test_integration.py
+
+# Run integration + e2e tests in parallel (requires coordinator + agent binaries)
+test-e2e:
+    cd cli && uv run pytest tests/test_integration.py tests/test_e2e_smoke.py -v -n auto --timeout=120
+
+# Run all Python tests (unit + integration + e2e)
 test-py:
     cd cli && uv run pytest tests/ -v
 
@@ -50,9 +58,10 @@ fmt-rust:
     cd engine && cargo fmt
 
 # Security audit (requires: cargo install cargo-audit)
+# CVE-2026-4539: pygments — fix not yet released on PyPI (2026-03-27).
 audit:
     cd engine && cargo audit
-    cd cli && uv run pip-audit
+    cd cli && uv run pip-audit --ignore-vuln CVE-2026-4539
 
 # ── Combined ──────────────────────────────────────────────────────────────────
 
@@ -62,5 +71,5 @@ test: test-rust test-py
 # Run all formatters
 fmt: fmt-rust fmt-py
 
-# Full CI check: lint + tests
-ci: check test-rust test-py
+# Full CI check: lint + tests (mirrors CI pipeline)
+ci: check test-rust test-unit test-e2e

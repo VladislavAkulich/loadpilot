@@ -18,28 +18,6 @@ use tracing_subscriber::EnvFilter;
 use crate::coordinator::SharedSnapshot;
 use crate::metrics::stdout_sink;
 
-/// Resolves on Ctrl+C (all platforms) or SIGTERM (Unix).
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-        tokio::select! {
-            _ = ctrl_c => {}
-            _ = sigterm.recv() => {}
-        }
-    }
-
-    #[cfg(not(unix))]
-    ctrl_c.await;
-}
 
 #[derive(Parser)]
 #[command(name = "coordinator", about = "LoadPilot coordinator process")]
@@ -94,9 +72,29 @@ async fn main() -> Result<()> {
     let shared_snapshot: SharedSnapshot = Arc::new(RwLock::new(None));
 
     // Graceful shutdown: fires on Ctrl+C or SIGTERM.
+    // Signal handlers are registered here — immediately at startup, before any
+    // spawned tasks or blocking operations — so SIGTERM is always caught even
+    // under high task load (e.g. 100+ RPS spawning request tasks).
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    #[cfg(unix)]
+    let mut sigterm_stream = {
+        use tokio::signal::unix::{signal, SignalKind};
+        signal(SignalKind::terminate()).expect("failed to install SIGTERM handler")
+    };
     tokio::spawn(async move {
-        shutdown_signal().await;
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = sigterm_stream.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl+C handler");
+        }
         tracing::info!("shutdown signal — initiating graceful shutdown");
         let _ = shutdown_tx.send(true);
     });

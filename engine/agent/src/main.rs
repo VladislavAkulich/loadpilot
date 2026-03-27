@@ -65,26 +65,6 @@ struct ControlMsg {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-        tokio::select! {
-            _ = ctrl_c => {}
-            _ = sigterm.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    ctrl_c.await;
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -95,8 +75,25 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    #[cfg(unix)]
+    let mut sigterm_stream = {
+        use tokio::signal::unix::{signal, SignalKind};
+        signal(SignalKind::terminate()).expect("failed to install SIGTERM handler")
+    };
     tokio::spawn(async move {
-        shutdown_signal().await;
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = sigterm_stream.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl+C handler");
+        }
         tracing::info!("shutdown signal — will not reconnect after current run");
         let _ = shutdown_tx.send(true);
     });

@@ -42,7 +42,9 @@ class TaskPlan(BaseModel):
     def method_valid(cls, v: str) -> str:
         upper = v.upper()
         if upper not in _VALID_METHODS:
-            raise ValueError(f"unknown HTTP method {v!r}; valid: {', '.join(sorted(_VALID_METHODS))}")
+            raise ValueError(
+                f"unknown HTTP method {v!r}; valid: {', '.join(sorted(_VALID_METHODS))}"
+            )
         return upper
 
 
@@ -128,9 +130,7 @@ class ScenarioPlan(BaseModel):
     def target_url_valid(cls, v: str) -> str:
         parsed = urlparse(v)
         if parsed.scheme not in ("http", "https"):
-            raise ValueError(
-                f"target_url must start with http:// or https://, got {v!r}"
-            )
+            raise ValueError(f"target_url must start with http:// or https://, got {v!r}")
         if not parsed.netloc:
             raise ValueError(f"target_url has no host: {v!r}")
         return v

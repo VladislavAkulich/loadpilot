@@ -3,7 +3,15 @@ name: CI
 on:
   push:
     branches: [main]
+    paths:
+      - 'engine/**'
+      - 'cli/**'
+      - '.github/workflows/**'
   pull_request:
+    paths:
+      - 'engine/**'
+      - 'cli/**'
+      - '.github/workflows/**'
 
 jobs:
   # ── Lint & format (Python + Rust) ────────────────────────────────────────────
@@ -78,8 +86,9 @@ jobs:
 
       - name: pip-audit
         working-directory: cli
-        # CVE-2026-4539: pygments fix not yet released on PyPI (2026-03-20).
-        # Remove --ignore-vuln once pygments publishes a patched version.
+        # CVE-2026-4539: pygments — fix not yet released on PyPI (2026-03-27).
+        # CVE-2026-25645: requests — fixed in 2.33.0, pinned via uv.lock.
+        # Remove --ignore-vuln entries once pygments publishes a patched version.
         run: uv run pip-audit --ignore-vuln CVE-2026-4539
 
   # ── Rust: unit tests + coverage ──────────────────────────────────────────────
@@ -105,22 +114,12 @@ jobs:
         working-directory: engine
         run: cargo llvm-cov --package coordinator --summary-only
 
-  # ── Python: integration tests + coverage ─────────────────────────────────────
+  # ── Python: unit tests ───────────────────────────────────────────────────────
   python:
     name: Python tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: engine
-
-      - name: Build coordinator
-        working-directory: engine
-        run: cargo build --package coordinator
 
       - uses: astral-sh/setup-uv@v5
 
@@ -131,6 +130,37 @@ jobs:
         working-directory: cli
         run: uv sync --extra dev
 
-      - name: Run tests
+      - name: Run unit tests
         working-directory: cli
-        run: uv run pytest tests/ -v
+        run: uv run pytest tests/ -v --ignore=tests/test_e2e_smoke.py --ignore=tests/test_integration.py
+
+  # ── E2e smoke tests (release binaries) ───────────────────────────────────────
+  e2e:
+    name: E2e smoke tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      - name: Build coordinator + agent (release)
+        working-directory: engine
+        run: cargo build --release --package coordinator --package agent
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Copy README for package build
+        run: cp README.md cli/README.md
+
+      - name: Install dependencies
+        working-directory: cli
+        run: uv sync --extra dev
+
+      - name: Run integration + e2e tests (parallel)
+        working-directory: cli
+        run: uv run pytest tests/test_integration.py tests/test_e2e_smoke.py -v -n auto --timeout=120

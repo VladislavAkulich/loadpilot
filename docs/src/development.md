@@ -24,33 +24,47 @@ by the CLI at runtime when running from source.
 
 ## Running Tests
 
-### Python tests
+The test suite is split into three layers:
+
+| Layer | Files | Requires | Time |
+|---|---|---|---|
+| Unit | all except `test_integration.py`, `test_e2e_smoke.py` | nothing | ~1s |
+| Integration | `test_integration.py` | coordinator binary | ~15s parallel |
+| E2e | `test_e2e_smoke.py` | coordinator + agent binaries | ~25s parallel |
+
+### Unit tests
+
+No Rust build required:
 
 ```bash
 cd cli
 uv sync --extra dev
-uv run pytest tests/ -v
+just test-unit
+# or: uv run pytest tests/ -v --ignore=tests/test_e2e_smoke.py --ignore=tests/test_integration.py
 ```
 
-Coverage is reported automatically after every run (configured in `pyproject.toml`):
+### Integration + E2e tests
 
-```
-Name                    Stmts   Miss  Cover   Missing
------------------------------------------------------
-loadpilot/models.py        46      2    96%   ...
-loadpilot/dsl.py           47      6    87%   ...
-...
-```
-
-HTML coverage report is written to `cli/htmlcov/index.html`.
-
-Integration tests require the coordinator binary to be built:
+Build both binaries first, then run all subprocess-based tests in parallel:
 
 ```bash
-cd engine && cargo build  # or cargo build --release
+cd engine && cargo build --package coordinator --package agent
+cd ../cli
+just test-e2e
+# or: uv run pytest tests/test_integration.py tests/test_e2e_smoke.py -v -n auto --timeout=120
 ```
 
-Tests skip automatically with a clear message if the binary is not found.
+Tests that require the coordinator binary skip automatically with a clear message if the binary is not found.
+
+### All Python tests
+
+```bash
+just test-py
+# or: cd cli && uv run pytest tests/ -v
+```
+
+Coverage is reported automatically after every run (configured in `pyproject.toml`).
+HTML coverage report is written to `cli/htmlcov/index.html`.
 
 ### Rust tests + coverage
 
@@ -89,6 +103,28 @@ Install `cargo-llvm-cov` if not present:
 ```bash
 cargo install cargo-llvm-cov
 rustup component add llvm-tools-preview
+```
+
+## CI Pipeline
+
+CI runs on every push to `main` and on pull requests that touch `engine/`, `cli/`, or `.github/workflows/`. Changes to docs, README, or justfile do not trigger CI.
+
+| Job | What it runs | Rust build |
+|---|---|---|
+| `lint` | ruff, cargo fmt, cargo clippy | debug (cached) |
+| `audit` | cargo audit, pip-audit | debug (cached) |
+| `rust` | cargo llvm-cov (unit tests + coverage) | debug (cached) |
+| `python` | unit tests only (no coordinator needed) | none |
+| `e2e` | integration + e2e tests, `-n auto`, `--timeout=120` | **release** (cached) |
+
+The `e2e` job uses release binaries so tests run at production speed and timing-sensitive assertions are reliable.
+
+### Security audits
+
+```bash
+just audit
+# cargo audit  — checks Rust dependencies against RustSec advisory database
+# pip-audit    — checks Python dependencies against OSV/PyPI advisories
 ```
 
 ## Helm Chart
@@ -219,8 +255,15 @@ loadpilot/
       _bridge.py          ← MockClient (used by _build_plan to extract URLs)
       report.py           ← HTML report generator
     tests/
-      test_integration.py ← End-to-end: Python plan → Rust coordinator subprocess
-      test_cli_plan.py    ← Unit tests for _build_plan() scenario selection logic
+      _helpers.py         ← Shared fixtures: MockServer, run_coordinator, free_port
+      test_models.py      ← Unit: ScenarioPlan / TaskPlan validation
+      test_dsl.py         ← Unit: @scenario / @task DSL
+      test_cli_plan.py    ← Unit: _build_plan() scenario selection logic
+      test_bridge.py      ← Unit: MockClient / PyO3 bridge helpers
+      test_client.py      ← Unit: LoadClient
+      test_report.py      ← Unit: HTML report generation
+      test_integration.py ← Integration: Python plan → coordinator subprocess
+      test_e2e_smoke.py   ← E2e: all run modes + graceful shutdown (parallel)
 
   engine/                 ← Rust workspace
     coordinator/src/
