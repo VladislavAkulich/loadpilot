@@ -228,9 +228,28 @@ helm install loadpilot oci://ghcr.io/vladislavakul ich/charts/loadpilot \
   --namespace loadpilot --create-namespace
 ```
 
-### Known limitations
+### Running coordinator in-cluster
 
-- Coordinator runs locally, not in the cluster — Prometheus scraping requires `host.docker.internal` or explicit IP
+The coordinator can run inside the cluster in serve mode (`--serve` flag). Enable it via:
+
+```bash
+helm install loadpilot cli/loadpilot/charts/loadpilot \
+  --set coordinator.enabled=true \
+  --set coordinator.image=loadpilot-coordinator \
+  --set coordinator.tag=local \
+  --set coordinator.imagePullPolicy=Never \
+  --set "coordinator.serveAgents=3" \
+  --set monitoring.coordinator.scrapeTarget=""
+```
+
+In serve mode the coordinator listens on `0.0.0.0:8080`:
+
+| Endpoint | Description |
+|---|---|
+| `POST /run` | Accept `ScenarioPlan` JSON, stream ndjson metrics. Returns `409` if a test is already running. |
+| `GET /healthz` | Readiness probe — returns `ok` |
+
+By default `coordinator.enabled: false` because the coordinator image must be built separately from the agent image.
 
 ## Benchmark
 
