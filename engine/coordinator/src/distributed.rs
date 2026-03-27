@@ -498,8 +498,10 @@ async fn aggregate_loop(
     // emit a metric (e.g. slow debug-build startup) are still caught by the
     // AGENT_TIMEOUT_SECS timeout and don't stall the loop indefinitely.
     let seed_time = std::time::Instant::now();
-    let mut last_seen: std::collections::HashMap<String, std::time::Instant> =
-        registered_agents.iter().map(|id| (id.clone(), seed_time)).collect();
+    let mut last_seen: std::collections::HashMap<String, std::time::Instant> = registered_agents
+        .iter()
+        .map(|id| (id.clone(), seed_time))
+        .collect();
     let mut timed_out: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut done_agents: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut tick = interval(Duration::from_secs(1));

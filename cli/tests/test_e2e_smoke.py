@@ -53,6 +53,7 @@ def _spawn(plan, extra_args=None):
     )
     proc.stdin.write(plan.model_dump_json() + "\n")
     proc.stdin.close()
+    proc.stdin = None  # prevent communicate() from flushing closed stdin on Linux
     return proc
 
 

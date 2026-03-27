@@ -18,7 +18,6 @@ use tracing_subscriber::EnvFilter;
 use crate::coordinator::SharedSnapshot;
 use crate::metrics::stdout_sink;
 
-
 #[derive(Parser)]
 #[command(name = "coordinator", about = "LoadPilot coordinator process")]
 struct Args {
