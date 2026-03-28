@@ -38,12 +38,20 @@ def helm_deploy(
     )
 
     cmd = [
-        "helm", "upgrade", "--install", _HELM_RELEASE, str(_CHART_DIR),
-        "--namespace", namespace,
+        "helm",
+        "upgrade",
+        "--install",
+        _HELM_RELEASE,
+        str(_CHART_DIR),
+        "--namespace",
+        namespace,
         "--create-namespace",
-        "--set", f"agent.replicas={agents}",
-        "--set", f"nats.service.type={nats_service}",
-        "--set", f"monitoring.enabled={str(not no_monitoring).lower()}",
+        "--set",
+        f"agent.replicas={agents}",
+        "--set",
+        f"nats.service.type={nats_service}",
+        "--set",
+        f"monitoring.enabled={str(not no_monitoring).lower()}",
         "--wait",
     ]
     if set_values:

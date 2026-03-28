@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import typer
 from rich.console import Console
 from rich.panel import Panel
 
 from loadpilot.models import AgentMetrics
+
+if TYPE_CHECKING:
+    from loadpilot._knee import KneePoint
 
 console = Console()
 
@@ -142,3 +145,16 @@ def _check_thresholds(metrics: AgentMetrics, thresholds: dict[str, float]) -> bo
 
     console.print("\n[bold green]All thresholds passed.[/]")
     return False
+
+
+def print_knee_point(knee: "KneePoint") -> None:
+    """Print knee point analysis result to console."""
+    pct = int(knee.rps / knee.max_rps * 100) if knee.max_rps > 0 else 0
+    console.print("\n[bold]Knee Point[/]  [dim](step mode — last SLO-safe step)[/]")
+    console.print(f"  Last safe step     : [green]{knee.step}[/] / {knee.total_steps}")
+    console.print(
+        f"  Max sustainable RPS: [green]{knee.rps:.0f}[/]  "
+        f"[dim]({pct}% of peak {knee.max_rps:.0f} RPS)[/]"
+    )
+    console.print(f"  p99 at knee        : {knee.p99_ms:.0f}ms")
+    console.print(f"  Error rate at knee : {knee.error_rate_pct:.2f}%")

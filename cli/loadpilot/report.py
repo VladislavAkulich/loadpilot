@@ -11,6 +11,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from loadpilot._knee import KneePoint
 from loadpilot.models import AgentMetrics
 
 
@@ -24,6 +25,7 @@ def generate(
     output_path: Path,
     thresholds: dict[str, float] | None = None,
     n_agents: int = 1,
+    knee: KneePoint | None = None,
 ) -> None:
     """Build and write the HTML report to *output_path*."""
     html = _build(
@@ -35,6 +37,7 @@ def generate(
         ramp_up_secs,
         thresholds or {},
         n_agents,
+        knee,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
@@ -60,6 +63,7 @@ def _build(
     ramp_up_secs: int,
     thresholds: dict[str, float] | None = None,
     n_agents: int = 1,
+    knee: KneePoint | None = None,
 ) -> str:
     # Exclude the final "done" snapshot from charts (rps=0, target=0).
     chart_snaps = [s for s in snapshots if s.phase != "done"]
@@ -89,6 +93,7 @@ def _build(
             "p50": p50_ts,
             "p95": p95_ts,
             "p99": p99_ts,
+            "knee_rps": knee.rps if knee else None,
         }
     )
 
@@ -103,6 +108,35 @@ def _build(
     lat_max = f"{lat.max_ms:.0f}" if lat else "—"
     lat_min = f"{lat.min_ms:.0f}" if lat else "—"
     lat_mean = f"{lat.mean_ms:.1f}" if lat else "—"
+
+    # ── Knee point section ────────────────────────────────────────────────────
+    knee_html = ""
+    if knee:
+        pct = int(knee.rps / knee.max_rps * 100) if knee.max_rps > 0 else 0
+        knee_html = (
+            "\n  <!-- Knee point -->\n"
+            '  <div class="section knee-section">\n'
+            '    <div class="section-title">Knee Point — Step Mode SLO Analysis</div>\n'
+            '    <div class="knee-grid">\n'
+            '      <div class="knee-cell">\n'
+            '        <div class="knee-label">Last SLO-Safe Step</div>\n'
+            f'        <div class="knee-value">{knee.step} <span class="knee-of">/ {knee.total_steps}</span></div>\n'
+            "      </div>\n"
+            '      <div class="knee-cell">\n'
+            '        <div class="knee-label">Max Sustainable RPS</div>\n'
+            f'        <div class="knee-value">{knee.rps:.0f} <span class="knee-of">({pct}%)</span></div>\n'
+            "      </div>\n"
+            '      <div class="knee-cell">\n'
+            '        <div class="knee-label">p99 at Knee</div>\n'
+            f'        <div class="knee-value">{knee.p99_ms:.0f}<span class="knee-of"> ms</span></div>\n'
+            "      </div>\n"
+            '      <div class="knee-cell">\n'
+            '        <div class="knee-label">Error Rate at Knee</div>\n'
+            f'        <div class="knee-value">{knee.error_rate_pct:.2f}<span class="knee-of"> %</span></div>\n'
+            "      </div>\n"
+            "    </div>\n"
+            "  </div>"
+        )
 
     # ── Threshold rows ─────────────────────────────────────────────────────────
     thresholds_html = ""
@@ -222,6 +256,19 @@ def _build(
                    letter-spacing: 0.06em; color: var(--muted); }}
   .config-value {{ font-size: 0.95rem; font-weight: 600; margin-top: 2px; }}
 
+  /* ── Knee point ── */
+  .knee-section {{ border-left: 4px solid var(--primary); }}
+  .knee-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }}
+  .knee-cell {{ text-align: center; padding: 12px 8px;
+               border-radius: 10px; background: var(--primary-light); }}
+  .knee-label {{ font-size: 0.65rem; font-weight: 700; text-transform: uppercase;
+                 letter-spacing: 0.06em; color: var(--muted); }}
+  .knee-value {{ font-size: 1.5rem; font-weight: 800; margin-top: 4px; color: var(--primary); }}
+  .knee-of {{ font-size: 0.75rem; font-weight: 500; color: var(--muted); }}
+  @media (max-width: 800px) {{
+    .knee-grid {{ grid-template-columns: repeat(2, 1fr); }}
+  }}
+
   /* ── Thresholds table ── */
   .thr-table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
   .thr-table td {{ padding: 8px 12px; }}
@@ -285,6 +332,8 @@ def _build(
       <div class="card-sub">ramp-up {_fmt_dur(ramp_up_secs)}</div>
     </div>
   </div>
+
+{knee_html}
 
 {thresholds_html}
 
@@ -400,6 +449,16 @@ new Chart(rpsCtx, {{
         fill: false,
         tension: 0.3,
       }},
+      ...(D.knee_rps != null ? [{{
+        label: "Knee RPS",
+        data: D.elapsed.map(() => D.knee_rps),
+        borderColor: "#6366f1",
+        borderWidth: 1.5,
+        borderDash: [3, 3],
+        pointRadius: 0,
+        fill: false,
+        tension: 0,
+      }}] : []),
     ],
   }},
   options: {{

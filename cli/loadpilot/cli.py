@@ -12,9 +12,10 @@ from rich.console import Console
 from loadpilot import report as _report
 from loadpilot._compare import run_compare
 from loadpilot._coordinator import _find_coordinator_binary, _load_scenario_file
-from loadpilot._display import _check_thresholds, _resolve_target
+from loadpilot._display import _check_thresholds, _resolve_target, print_knee_point
 from loadpilot._init import scaffold_project
 from loadpilot._k8s import helm_deploy, helm_teardown
+from loadpilot._knee import detect_knee_point
 from loadpilot._plan_builder import _build_plan
 from loadpilot._results import save_baseline, save_results_json
 from loadpilot._runner import _build_coordinator_cmd, _run_local, _run_remote
@@ -250,6 +251,8 @@ def run_command(
             finally:
                 client.close()
 
+    knee = detect_knee_point(all_snapshots or [], plan, plan.thresholds)
+
     if last_metrics:
         console.print("\n[bold green]Test complete![/]")
         console.print(f"  Total requests : {last_metrics.requests_total:,}")
@@ -258,6 +261,9 @@ def run_command(
         console.print(f"  p99 latency    : {last_metrics.latency.p99_ms:.0f}ms")
     else:
         console.print("[yellow]No metrics received from coordinator.[/]")
+
+    if knee:
+        print_knee_point(knee)
 
     if report is not None and all_snapshots:
         _report.generate(
@@ -270,11 +276,12 @@ def run_command(
             output_path=report,
             thresholds=plan.thresholds,
             n_agents=external_agents if external_agents > 0 else agents,
+            knee=knee,
         )
         console.print(f"  Report         : [cyan]{report}[/]")
 
     if results_json is not None and last_metrics:
-        save_results_json(results_json, last_metrics, scenario_name, target, plan)
+        save_results_json(results_json, last_metrics, scenario_name, target, plan, knee)
 
     if save_baseline_flag and last_metrics:
         save_baseline(last_metrics, scenario_name, target, plan)

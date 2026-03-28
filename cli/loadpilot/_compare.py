@@ -69,9 +69,7 @@ def run_compare(current: Path, baseline: Path, regression_threshold: float) -> N
             if abs(diff_pct) >= regression_threshold:
                 regressions.append(f"{label} regressed {diff_pct:+.1f}%")
 
-        console.print(
-            f"  {label:<18}  {b_str:>12}  {c_str:>12}  [{color}]{diff_str:>10}[/{color}]"
-        )
+        console.print(f"  {label:<18}  {b_str:>12}  {c_str:>12}  [{color}]{diff_str:>10}[/{color}]")
 
     console.print()
 
